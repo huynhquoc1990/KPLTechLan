@@ -80,4 +80,14 @@ struct PumpLog {
   uint8_t checksum;      // Byte 30
   uint8_t send3;         // Byte 31
 };
+
+struct TimeSetup
+{
+  uint8_t ngay ;   // Ngày
+  uint8_t thang ;  // Tháng
+  uint8_t nam ;   // Năm
+  uint8_t gio ;    // Giờ
+  uint8_t phut ;  // Phút
+  uint8_t giay ;  // Giây
+};
 #endif // STRUCTDATA_H

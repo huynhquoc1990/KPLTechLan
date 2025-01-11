@@ -4,7 +4,7 @@
 #define RX_PIN              35//16 // 35
 #define TX_PIN              32 //17 //32
 #define ITEM_SIZE_RS485     125
-#define RS485BaudRate       19200
+#define RS485BaudRate       9600
 #define WIFI_TIMEOUT_MS     20000
 #define OUT1                15
 #define OUT2                2
@@ -17,6 +17,11 @@ const char* mqttServer =    "103.57.221.161"; // "tongmcbd.vlxdbdphongit.com"; 1
 const int   mqttPort =        1883;                  
 const char* mqttUser =      "qhu";
 const char* mqttPassword =  "T@nqu0c1";
+
+// Định nghĩa máy chủ NTP
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 3600 * 7;  // Múi giờ GMT+7
+const int   daylightOffset_sec = 3600;
 
 
 // Cấu hình của Ethernet Lan Ethernet (LAN8720) I/O define:
@@ -45,5 +50,8 @@ const char* TopicSendData = "/GetData/";
 const char* TopicStatus   = "/GetStatus/";
 const char* TopicShift    = "/Shift/";
 const char* TopicChange   = "/Change/"; // Topic thay đổi trạng thái bán hàng: bán hàng/ Test bồn/ Lường  
+
+const uint8_t idVoiList[] = {99, 100, 101}; // Thêm các ID vòi khác tại đây
+
 
 #endif // STRUCTDATA_H

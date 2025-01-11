@@ -1,6 +1,7 @@
 #ifndef TTL_H
 #define TTL_H
 #include <Arduino.h>
+#include "structdata.h"
 void getLogData(String command, char *&param)
 {
   char *tempdata = (char *)pvPortMalloc(SIZE_MAX * sizeof(char));
@@ -45,6 +46,87 @@ void getLogData(String command, char *&param)
 
   // Giải phóng tempdata sau khi sao chép
   vPortFree(tempdata);
+}
+
+// Hàm gửi lệnh SET thời gian
+void sendSetTimeCommand(uint8_t idVoi, TimeSetup *time) {
+    uint8_t buffer[10]; // Mảng lưu dữ liệu lệnh
+    uint8_t ngay = time->ngay;   // Ngày
+    uint8_t thang = time->thang;  // Tháng
+    uint8_t nam = time->nam;   // Năm
+    uint8_t gio = time->gio;    // Giờ
+    uint8_t phut = time->phut;  // Phút
+    uint8_t giay = time->ngay;  // Giây
+    uint8_t checksum;
+
+    // Xây dựng lệnh
+    buffer[0] = 93;      // Byte 1: Lệnh bắt đầu (93 = 0x5D)
+    buffer[1] = idVoi;   // Byte 2: ID Vòi
+    buffer[2] = ngay;    // Byte 3: Ngày
+    buffer[3] = thang;   // Byte 4: Tháng
+    buffer[4] = nam;     // Byte 5: Năm
+    buffer[5] = gio;     // Byte 6: Giờ
+    buffer[6] = phut;    // Byte 7: Phút
+    buffer[7] = giay;    // Byte 8: Giây
+
+    // Tính checksum (0xA5 XOR với tất cả các byte từ ID Vòi đến Giây)
+    checksum = 0xA5;
+    for (int i = 1; i < 8; i++) { // XOR từ byte 1 đến byte 7
+        checksum ^= buffer[i];
+    }
+    buffer[8] = checksum; // Byte 9: Checksum
+    buffer[9] = 94;       // Byte 10: Lệnh kết thúc (94 = 0x5E)
+
+    // Gửi lệnh qua RS485
+    Serial2.write(buffer, 10); // Gửi 10 byte dữ liệu
+
+    // In dữ liệu lệnh để debug
+    Serial.printf("Command Sent to ID %d: ", idVoi);
+    for (int i = 0; i < 10; i++) {
+        Serial.printf("0x%02X ", buffer[i]);
+    }
+    Serial.println();
+}
+
+// Hàm đọc phản hồi
+bool readResponse(uint8_t idVoi) {
+    uint8_t response[4]; // Phản hồi yêu cầu có 4 byte
+    unsigned long startTime = millis();
+
+    // Chờ dữ liệu phản hồi trong 2 giây
+    while (Serial2.available() < 4) {
+        if (millis() - startTime > 2000) { // Hết thời gian chờ
+            Serial.printf("No response received from ID %d!\n", idVoi);
+            return false;
+        }
+    }
+
+    // Đọc dữ liệu phản hồi
+    for (int i = 0; i < 4; i++) {
+        response[i] = Serial2.read();
+    }
+
+    // Kiểm tra dữ liệu phản hồi
+    Serial.printf("Response from ID %d: ", idVoi);
+    for (int i = 0; i < 4; i++) {
+        Serial.printf("0x%02X ", response[i]);
+    }
+    Serial.println();
+
+    // Phản hồi đúng cấu trúc: 7 + ID Vòi + 'S' hoặc 'E' + 8
+    if (response[0] == 7 && response[1] == idVoi &&
+       (response[2] == 'S' || response[2] == 'E') && response[3] == 8) {
+        if (response[2] == 'S') {
+            Serial.printf("Command successful for ID %d!\n", idVoi);
+            return true;
+        } else if (response[2] == 'E') {
+            Serial.printf("Command failed for ID %d!\n", idVoi);
+            return false;
+        }
+    } else {
+        Serial.printf("Invalid response structure from ID %d!\n", idVoi);
+        return false;
+    }
 }
 
 #endif // TTL_H

@@ -22,6 +22,7 @@
 #include <FlashFile.h>
 #include <Inits.h>
 #include <Api.h>
+#include <TTL.h>
 
 // Khởi tạo client
 
@@ -38,7 +39,10 @@ bool ethPreviouslyConnected = false; // Cờ kiểm tra trạng thái kết nố
 DeviceStatus *deviceStatus = new DeviceStatus;
 CompanyInfo *companyInfo = new CompanyInfo; // lấy thông tin của company khi internet được kết nối
 Settings *settings = new Settings;
+TimeSetup *timeSetup = new TimeSetup;
+
 uint32_t currentId = 0; // ID vô hạn
+const int numOfVoi = sizeof(idVoiList) / sizeof(idVoiList[0]); // Số lượng vòi
 
 // Thông tin chung của topic mqtt connected
 char fullTopic[50]; // Đảm bảo kích thước đủ lớn
@@ -73,12 +77,12 @@ void ethernetTask(void *pvParameters);
 void getInfoConnectMqtt();
 void checkInternetConnection();
 void sendDataCommand(String command, char *&param);
-
+void processAllVoi(TimeSetup *time); // Xử lý tất cả các ID vòi
 /// @brief Hàm setup thiết lập các thông tin ban đầu
 void setup()
 {
   Serial.begin(115200);
-  esp_task_wdt_init(15, true);
+  esp_task_wdt_init(25, true);
   esp_task_wdt_add(NULL); // Thêm các nhiệm vụ bạn muốn giám sát, NULL để giám sát tất cả nhiệm vụ
   // Initialize RS485
   Serial2.begin(RS485BaudRate, SERIAL_8N1, RX_PIN, TX_PIN);
@@ -93,7 +97,7 @@ void setup()
     Serial.println("Waiting for Ethernet connection...");
     delay(1000);
   }
-  ethConnected = true;
+  
 
   // Hiển thị thông tin kết nối
   Serial.print("Connected! IP address: ");
@@ -117,6 +121,30 @@ void setup()
   Serial.printf("Log read successfully for ID: %u\n", currentId);
 
   Serial.println("Setup finished");
+  // KIỂM TRA INTERNET CÓ ĐỂ LẤY THỜI GIAN THỰC
+  while (!ethConnected)
+  {
+    Serial.print(".");
+    checkInternetConnection();
+    delay(1000);
+  }
+  Serial.println(" ");
+  // Cấu hình NTP
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  // In ra thời gian ban đầu
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+    return;
+  }
+  Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+
+  setUpTime(timeSetup, timeinfo);
+  // Đồng bộ thời gian với bên KPL
+  processAllVoi(timeSetup); // Xử lý tất cả các ID vòi
+  // Thông báo KPL ESP32 đã sẵn sàng
+
+
   xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
 }
 
@@ -278,7 +306,6 @@ void runCommandRs485(void *param)
   }
 }
 
-
 /// Kích hoạt lại relay để nhấn O-E để thực hiện việc in lại dữ liệu
 void getIdLogLoss(void *param)
 {
@@ -369,6 +396,16 @@ void getInfoConnectMqtt()
   Serial.println(companyInfo->CompanyId);
 }
 
+// Hàm xử lý tất cả các vòi
+void processAllVoi(TimeSetup *time) {
+    for (int i = 0; i < numOfVoi; i++) {
+        uint8_t idVoi = idVoiList[i];
+        sendSetTimeCommand(idVoi, time); // Gửi lệnh cho ID vòi
+        delay(100);                // Chờ phản hồi từ thiết bị
+        readResponse(idVoi);       // Đọc phản hồi
+        delay(100);                // Chờ thêm để tránh xung đột
+    }
+}
 /// @brief Check kết nối internet
 void checkInternetConnection()
 {
