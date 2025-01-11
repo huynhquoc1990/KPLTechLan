@@ -1,3 +1,5 @@
+#ifndef SETTINGS_H
+#define SETTINGS_H
 // Thông số của RS485
 #define RX_PIN              35//16 // 35
 #define TX_PIN              32 //17 //32
@@ -7,7 +9,7 @@
 #define OUT1                15
 #define OUT2                2
 #define INPUT1              36
-const char *filePath = "/data.txt";
+#define FLASH_DATA_FILE "/log.bin" // File lưu dữ liệu log
 
 // Thông tin hệ thống mqtt
 
@@ -22,15 +24,6 @@ const char* mqttPassword =  "T@nqu0c1";
 #define ETH_POWER_PIN  -1
 #define ETH_MDC_PIN    23
 #define ETH_MDIO_PIN  18
-
-// #ifndef ETH_CLK_MODE
-// #define ETH_CLK_MODE ETH_CLOCK_GPIO17_OUT
-// #endif
-
-// #ifndef ETH_TYPE
-// #define ETH_TYPE ETH_PHY_LAN8720
-// #endif
-
 #define ETH_TYPE      ETH_PHY_LAN8720
 #define ETH_CLK_MODE  ETH_CLOCK_GPIO17_OUT
 
@@ -52,3 +45,5 @@ const char* TopicSendData = "/GetData/";
 const char* TopicStatus   = "/GetStatus/";
 const char* TopicShift    = "/Shift/";
 const char* TopicChange   = "/Change/"; // Topic thay đổi trạng thái bán hàng: bán hàng/ Test bồn/ Lường  
+
+#endif // STRUCTDATA_H

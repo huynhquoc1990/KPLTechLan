@@ -1,0 +1,2 @@
+snprintf(dta, sizeof(dta), "{%s%s%s}", dataLogId.Request_Code, "7", logIdHex);
+Kết hợp các thông số vào chuổi và được lưu vào dta. Hàm này chỉ dùng cho chuổi kỹ tự

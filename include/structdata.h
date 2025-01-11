@@ -1,5 +1,11 @@
+#ifndef STRUCTDATA_H
+#define STRUCTDATA_H
+
 #include <cstdint>
 #include <Arduino.h>
+const size_t LOG_SIZE = 32; // Số byte trong 1 log
+#define MAX_LOGS 5000       // Số log tối đa (cố định)
+#define LOG_SIZE 32         // Kích thước mỗi log
 
 struct DeviceStatus
 {
@@ -52,3 +58,26 @@ struct DeviceGetStatus {
     char Request_Code[6];
     byte Status;
 };
+
+// Cấu trúc dữ liệu log
+struct PumpLog {
+  uint8_t send1;         // Byte 1
+  uint8_t send2;         // Byte 2
+  uint8_t idVoi;         // Byte 3
+  uint16_t viTriLogCot;  // Byte 4-5
+  uint16_t viTriLogData; // Byte 6-7
+  uint16_t maLanBom;     // Byte 8-9
+  uint32_t soLitBom;     // Byte 10-13
+  uint16_t donGia;       // Byte 14-15
+  uint32_t soTotalTong;  // Byte 16-19
+  uint32_t soTienBom;    // Byte 20-23
+  uint8_t ngay;          // Byte 24
+  uint8_t thang;         // Byte 25
+  uint8_t nam;           // Byte 26
+  uint8_t gio;           // Byte 27
+  uint8_t phut;          // Byte 28
+  uint8_t giay;          // Byte 29
+  uint8_t checksum;      // Byte 30
+  uint8_t send3;         // Byte 31
+};
+#endif // STRUCTDATA_H
