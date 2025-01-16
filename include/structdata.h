@@ -3,9 +3,25 @@
 
 #include <cstdint>
 #include <Arduino.h>
-const size_t LOG_SIZE = 32; // Số byte trong 1 log
 #define MAX_LOGS 5000       // Số log tối đa (cố định)
 #define LOG_SIZE 32         // Kích thước mỗi log
+
+
+
+struct GetIdLogLoss
+{
+  char Idvoi[12];
+  char Today[12];
+  char Request_Code[6];
+  char CompanyId[20];
+};
+
+// task này nhằm mục đích truyền 2 tham số vào hàm call API để lấy Log data loss và lưu vào
+struct TaskParams {
+    GetIdLogLoss *msg;
+    QueueHandle_t logIdLossQueue;
+};
+
 
 struct DeviceStatus
 {
@@ -37,7 +53,7 @@ struct logTagMonTech {
 struct CompanyInfo
 {
   char CompanyId[20];
-  char Mst[12];
+  char Mst[18];
   char Product[5];
 };
 
@@ -50,7 +66,6 @@ struct Settings
 struct DtaLogLoss
 {
   signed int Logid;
-  char Request_Code[6];
 };
 
 struct DeviceGetStatus {

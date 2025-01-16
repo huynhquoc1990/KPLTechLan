@@ -1,8 +1,8 @@
 #ifndef SETTINGS_H
 #define SETTINGS_H
 // Thông số của RS485
-#define RX_PIN              35//16 // 35
-#define TX_PIN              32 //17 //32
+#define RX_PIN              13//16 // 35 34
+#define TX_PIN              5 //17 //32 13
 #define ITEM_SIZE_RS485     125
 #define RS485BaudRate       9600
 #define WIFI_TIMEOUT_MS     20000
@@ -40,9 +40,9 @@ const int   daylightOffset_sec = 3600;
     - Sửa lại mảng deviceCommands tùy vào trụ cài đặc.
     - Thay đổi số thiết bị kết nối: DeviceNumber mặc định là 5, nhưng thực tế chỉ đọc 3
 */
-const char* TopicMqtt =     "QA-T01-V01";
-const char* wifi_ssid =     "Quoc Thu";   // Ctyanhthu
-const char* wifi_password = "T@nqu0c1"; // atcsoft12345
+const char* TopicMqtt =     "KPL2";
+// const char* wifi_ssid =     "Quoc Thu";   // Ctyanhthu
+// const char* wifi_password = "T@nqu0c1"; // atcsoft12345
 const char* TopicLogError = "/Error/";
 const char* TopicRestart  = "/Restart/";
 const char* TopicGetLogIdLoss = "/GetLogIdLoss/";
@@ -51,7 +51,7 @@ const char* TopicStatus   = "/GetStatus/";
 const char* TopicShift    = "/Shift/";
 const char* TopicChange   = "/Change/"; // Topic thay đổi trạng thái bán hàng: bán hàng/ Test bồn/ Lường  
 
-const uint8_t idVoiList[] = {99, 100, 101}; // Thêm các ID vòi khác tại đây
+const uint8_t idVoiList[] = {99}; // Thêm các ID vòi khác tại đây
 
 
 #endif // STRUCTDATA_H

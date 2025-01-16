@@ -2,9 +2,76 @@
 #define TTL_H
 #include <Arduino.h>
 #include "structdata.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+// Hàm gửi lệnh truy xuất log loss
+void sendLogRequest(uint16_t logPosition) {
+    // Kiểm tra giới hạn vị trí log
+    if (logPosition < 1 || logPosition > 2046) {
+        Serial.println("Invalid log position. Must be between 1 and 2046.");
+        return;
+    }
+
+    // Tách logPosition thành High Byte và Low Byte
+    uint8_t highByte = (logPosition >> 8) & 0xFF; // Lấy byte cao
+    uint8_t lowByte = logPosition & 0xFF;         // Lấy byte thấp
+
+    // Tính toán checksum
+    uint8_t checksum = 0xA5 ^ highByte ^ lowByte;
+
+    // Tạo buffer chứa dữ liệu
+    uint8_t buffer[5] = {
+        0xC8,        // Byte 1: Lệnh 200
+        highByte,    // Byte 2: High Byte của logPosition
+        lowByte,     // Byte 3: Low Byte của logPosition
+        checksum,    // Byte 4: Checksum
+        0xC9         // Byte 5: Lệnh kết thúc 201
+    };
+
+    // Gửi toàn bộ buffer
+    Serial2.write(buffer, sizeof(buffer));
+
+    // In dữ liệu để kiểm tra
+    Serial.println();
+    Serial.print("Data sent: ");
+    for (int i = 0; i < sizeof(buffer); i++) {
+        Serial.printf("0x%02X ", buffer[i]);
+    }
+    Serial.println();
+}
+
+//  Lệnh khởi động esp32 để thông báo với KPL là đã khởi động xong, sãn sàng nhận tín hiệu từ KPL
+void sendStartupCommand() {
+    // Dữ liệu cần gửi
+    uint8_t byte1 = 0x7D;  // Byte đầu tiên
+    uint8_t control1 = 0x33;  // Control 1
+    uint8_t control2 = 0x55;  // Control 2
+
+    // Tính Checksum
+    uint8_t checksum = 0xA5 ^ control1 ^ control2;
+
+    uint8_t byte5 = 0x7E;  // Byte cuối cùng
+
+    // Tạo buffer để gửi
+    uint8_t buffer[5] = {byte1, control1, control2, checksum, byte5};
+
+    // Gửi toàn bộ buffer cùng lúc
+    Serial2.write(buffer, sizeof(buffer));  // Gửi tất cả các byte trong buffer
+
+    // In dữ liệu gửi ra Serial Monitor (dạng hex)
+    Serial.println();
+    Serial.print("Data sent: ");
+    for (int i = 0; i < 5; i++) {
+        Serial.printf("0x%02X ", buffer[i]);
+    }
+    Serial.println();
+}
+
+
 void getLogData(String command, char *&param)
 {
-  char *tempdata = (char *)pvPortMalloc(SIZE_MAX * sizeof(char));
+  char *tempdata = (char*)pvPortMalloc(LOG_SIZE * sizeof(char));
   if (tempdata == NULL)
   {
     Serial.println("Error: Failed to allocate memory for tempdata");
@@ -127,6 +194,9 @@ bool readResponse(uint8_t idVoi) {
         Serial.printf("Invalid response structure from ID %d!\n", idVoi);
         return false;
     }
+
+    // Đảm bảo tất cả nhánh đều trả về
+    return false; // Giá trị mặc định nếu không có nhánh nào khớp
 }
 
 #endif // TTL_H

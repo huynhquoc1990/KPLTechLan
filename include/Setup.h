@@ -8,7 +8,7 @@
 // Hàm tính checksum
 uint8_t calculateChecksum_LogData(const uint8_t* data, size_t length) {
   uint8_t checksum = 0xA5; // Giá trị ban đầu
-  for (size_t i = 2; i < length - 2; i++) { // Xor từ byte ID đến byte Giây
+  for (size_t i = 2; i < 29; i++) { // Xor từ byte ID đến byte Giây
     checksum ^= data[i];
   }
   return checksum;
@@ -16,7 +16,7 @@ uint8_t calculateChecksum_LogData(const uint8_t* data, size_t length) {
 
 // Hàm gán Buffer Data Log vào PumpLog
 
-void ganLog(uint8_t *buffer, PumpLog &log) {
+void ganLog(byte *buffer, PumpLog &log) {
   log.send1 = buffer[0];
   log.send2 = buffer[1];
   log.idVoi = buffer[2];
@@ -41,13 +41,13 @@ void ganLog(uint8_t *buffer, PumpLog &log) {
 String convertPumpLogToJson(const PumpLog &log) {
   JsonDocument jsonDoc; // Tạo bộ nhớ cho JSO
   // Gán giá trị từ cấu trúc vào JSON
-  jsonDoc["send1"] = log.send1;
-  jsonDoc["send2"] = log.send2;
+  // jsonDoc["send1"] = log.send1;
+  // jsonDoc["send2"] = log.send2;
   jsonDoc["idVoi"] = log.idVoi;
-  jsonDoc["viTriLogCot"] = log.viTriLogCot;
-  jsonDoc["viTriLogData"] = log.viTriLogData;
-  jsonDoc["maLanBom"] = log.maLanBom;
-  jsonDoc["soLitBom"] = log.soLitBom;
+  jsonDoc["posLogCot"] = log.viTriLogCot;
+  jsonDoc["posLogData"] = log.viTriLogData;
+  jsonDoc["numsBom"] = log.maLanBom;
+  jsonDoc["LitBom"] = log.soLitBom;
   jsonDoc["donGia"] = log.donGia;
   jsonDoc["soTotalTong"] = log.soTotalTong;
   jsonDoc["soTienBom"] = log.soTienBom;
@@ -57,8 +57,8 @@ String convertPumpLogToJson(const PumpLog &log) {
   jsonDoc["gio"] = log.gio;
   jsonDoc["phut"] = log.phut;
   jsonDoc["giay"] = log.giay;
-  jsonDoc["checksum"] = log.checksum;
-  jsonDoc["send3"] = log.send3;
+  // jsonDoc["checksum"] = log.checksum;
+  // jsonDoc["send3"] = log.send3;
 
   // Chuyển đổi JSON thành chuỗi
   String jsonString;

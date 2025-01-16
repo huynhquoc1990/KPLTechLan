@@ -6,6 +6,8 @@
 #include <ETH.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <freertos/queue.h>
+
 /// @brief Hàm lấy thông tin từ server và kiểm tra nội dung có thay đổi trong flash hay không? Nếu có lưu mới
 /// @param settings
 void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex, bool &ethConnected)
@@ -180,4 +182,89 @@ void callAPIServerGetCompanyInfo(void *param)
   vTaskDelete(NULL);
 }
 
+
+/// @brief Chương trình lấy logid bị mất dựa trên counter- Sql server trả về là giá trị counter bị mất. từ Counter này truy vấn qua Idloger trong bộ nhớ của bộ số
+/// @param param
+void callAPIServerGetLogLoss(void *param){
+  TaskParams *params = (TaskParams *)param; // Ép kiểu về TaskParams
+  GetIdLogLoss *msg = params->msg;
+  QueueHandle_t LogIdLossQueue = params->logIdLossQueue;
+
+  // Serial.printf("id: %s \n", msg.Idvoi);
+  // Serial.printf("Today: %s \n", msg.Today);
+  // Serial.printf("Request_Code: %s\n", msg.Request_Code);
+  // Serial.printf("CompanyId: %s\n", msg.CompanyId);
+
+  if (ETH.linkUp())
+  {
+    HTTPClient http;
+    // Your API endpoint
+    String url = "http://103.57.221.161:5002/get-managerment/giaodich/Idloss";
+    http.begin(url);
+    // Headers
+    http.addHeader("Content-Type", "application/json");
+    // JSON data
+    JsonDocument doc;
+    doc["idvoi"] = msg->Idvoi;
+    doc["today"] = msg->Today;
+    doc["request_code"] = msg->Request_Code;
+    doc["company"] = msg->CompanyId;
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("json:" + json +"\n");
+    // Send the POST request
+    int httpResponseCode = http.POST(json.c_str());
+
+    if (httpResponseCode > 0 && httpResponseCode == 200)
+    {
+      String response = http.getString();
+      JsonDocument doc;
+      DeserializationError error = deserializeJson(doc, response);
+      if (!error)
+      {
+        // Get the size of the array
+        JsonArray array = doc.as<JsonArray>();
+        int arraySize = array.size();
+        // Serial.printf("Len: %d\n", arraySize);
+        // Loop through the JSON array and store the values in the integer array
+        if (arraySize > 0 ){
+          for (int i = 0; i < arraySize; i++)
+          {
+            DtaLogLoss dt;
+            signed int counter = array[i]["MissingIdLog"];
+            // dt.Logid = value;
+            Serial.println("Counter Loss: " + String(counter));
+            dt.Logid = counter;
+            // Serial.print("gapCounter: "); Serial.print(gapCounter);Serial.print("  idLog: "); Serial.print(idLog);Serial.print("  Counter: "); Serial.println(counter);
+            /* tính toán lại Logid dựa vào counter và chênh lệch giauwx counter và IdLog trước đó*/
+            if (xQueueSend(LogIdLossQueue, &dt, portMAX_DELAY) != pdPASS)
+            {
+                Serial.println("IdLog node add");
+            }
+          }
+        }
+      }
+      else
+      {
+        Serial.printf("Error parsing JSON: %s", error.c_str());
+      }
+    }
+    else
+    {
+      Serial.print("Error on sending POST request: ");
+      Serial.println(httpResponseCode);
+    }
+    http.end();
+  }
+  else
+  {
+    Serial.print("Khong co ket noi internet");
+  }
+   // Giải phóng bộ nhớ
+  delete msg;
+  delete params;
+  vTaskDelete(NULL);
+}
 #endif // API_H

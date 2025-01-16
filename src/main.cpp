@@ -40,8 +40,9 @@ DeviceStatus *deviceStatus = new DeviceStatus;
 CompanyInfo *companyInfo = new CompanyInfo; // lấy thông tin của company khi internet được kết nối
 Settings *settings = new Settings;
 TimeSetup *timeSetup = new TimeSetup;
+GetIdLogLoss *receivedMessage = new GetIdLogLoss;
 
-uint32_t currentId = 0; // ID vô hạn
+uint32_t currentId = 0;                                        // ID vô hạn
 const int numOfVoi = sizeof(idVoiList) / sizeof(idVoiList[0]); // Số lượng vòi
 
 // Thông tin chung của topic mqtt connected
@@ -78,6 +79,10 @@ void getInfoConnectMqtt();
 void checkInternetConnection();
 void sendDataCommand(String command, char *&param);
 void processAllVoi(TimeSetup *time); // Xử lý tất cả các ID vòi
+void mqttSendTask(void *parameter);
+void checkHeap();
+void readRs485(uint8_t *);
+
 /// @brief Hàm setup thiết lập các thông tin ban đầu
 void setup()
 {
@@ -97,7 +102,6 @@ void setup()
     Serial.println("Waiting for Ethernet connection...");
     delay(1000);
   }
-  
 
   // Hiển thị thông tin kết nối
   Serial.print("Connected! IP address: ");
@@ -108,7 +112,7 @@ void setup()
   client.setCallback(mqttCallback);
 
   // Khởi tạo Queue ban đầu
-  mqttQueue = xQueueCreate(15, 125 * sizeof(char));
+  mqttQueue = xQueueCreate(15, LOG_SIZE * sizeof(char));
   logIdLossQueue = xQueueCreate(100, sizeof(DtaLogLoss));
 
   // Create mutex for flash access
@@ -128,28 +132,35 @@ void setup()
     checkInternetConnection();
     delay(1000);
   }
+
   Serial.println(" ");
+  sendStartupCommand();
   // Cấu hình NTP
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   // In ra thời gian ban đầu
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
+   if (!getLocalTime(&timeinfo))
+  {
     Serial.println("Failed to obtain time");
-    return;
-  }
+    ESP.restart();
+  } 
   Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
-
   setUpTime(timeSetup, timeinfo);
   // Đồng bộ thời gian với bên KPL
   processAllVoi(timeSetup); // Xử lý tất cả các ID vòi
   // Thông báo KPL ESP32 đã sẵn sàng
-
+  sendStartupCommand();
 
   xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
+  xTaskCreate(runCommandRs485, "runCommandRs485", 8192, NULL, 2, &Handle_Rs485);
+  xTaskCreate(mqttSendTask, "mqttSendTask", 8192, NULL, 3, &Handle_MqttSend);
 }
 
+unsigned long timer = 0;
 void loop()
 {
+  // check heap
+  checkHeap();
 
   // Kiểm tra thông tin của thiết bị cơ bản: Head memory
 
@@ -162,6 +173,50 @@ void loop()
   esp_task_wdt_reset();
   vTaskDelay(100 / portTICK_PERIOD_MS);
   yield();
+}
+
+void mqttSendTask(void *parameter)
+{
+  char *data; // Dữ liệu lấy từ hàng đợi
+Serial.println("Started task mqtt send");
+
+while (true)
+{
+  // Nhận dữ liệu từ hàng đợi
+  if (xQueueReceive(mqttQueue, &data, pdMS_TO_TICKS(500)))
+  {
+    int retryCount = 0;         // Số lần thử lại
+    const int maxRetries = 3;  // Giới hạn số lần thử lại
+
+    while (retryCount < maxRetries)
+    {
+      // Thử gửi dữ liệu qua MQTT
+      if (client.publish(fullTopic, data))
+      {
+        Serial.printf("MQTT sent successfully: %s\n", data);
+        vPortFree(data); // Giải phóng bộ nhớ sau khi gửi thành công
+        break; // Thoát vòng lặp retry khi gửi thành công
+      }
+      else
+      {
+        Serial.printf("MQTT send failed (Attempt %d/%d)\n", retryCount + 1, maxRetries);
+        retryCount++;
+        vTaskDelay(500 / portTICK_PERIOD_MS); // Đợi trước khi thử lại
+      }
+    }
+
+    // Nếu vượt quá số lần thử lại, xử lý lỗi
+    if (retryCount == maxRetries)
+    {
+      Serial.println("Error: MQTT send failed after maximum retries. Discarding data.");
+      vPortFree(data); // Giải phóng bộ nhớ nếu không thể xử lý dữ liệu
+    }
+  }
+
+  // Chờ trước khi tiếp tục vòng lặp
+  vTaskDelay(100 / portTICK_PERIOD_MS);
+}
+
 }
 
 /// @brief Hàm này đọc thông tin phản hồi về từ mqtt publicer
@@ -178,65 +233,37 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   }
   if (strcmp(topic, topicError) == 0)
   {
-    DeviceGetStatus deviceGetStatus;
-    parsePayload_IdLogStatus(payload, length, &deviceGetStatus);
-    Serial.println(deviceGetStatus.Idvoi);
+    parsePayload_IdLogLoss(payload, length, receivedMessage, companyInfo);
+    // Serial.println(receivedMessage->Idvoi);
+    Serial.printf("Idvoi: %s  Mst: %s \n", receivedMessage->Idvoi, receivedMessage->CompanyId);
 
-    if (strcmp(deviceGetStatus.Idvoi, TopicMqtt) == 0)
+    if (logIdLossQueue != NULL)
     {
-      Serial.println("Lay lai thong tin giao dich");
-      // Phat tin hieu
-      xTaskCreate(getIdLogLoss, "LossLog", 1023, NULL, 3, &getIdLogLossHandle);
-      // xQueueSend(GetStatusDeviceQueue, &deviceGetStatus, pdMS_TO_TICKS(100));
+      if (strcmp(receivedMessage->Idvoi, TopicMqtt) == 0)
+      {
+        Serial.println("Lay lai thong tin giao dich");
+        Serial.printf("NumsLog: %d\n", uxQueueMessagesWaiting(logIdLossQueue));
+
+        if (uxQueueMessagesWaiting(logIdLossQueue) == 0)
+        {
+          TaskParams *taskParams = new TaskParams;
+          taskParams->msg = new GetIdLogLoss(*receivedMessage); // Sao chép dữ liệu
+          taskParams->logIdLossQueue = logIdLossQueue;
+          // Tạo task
+          if (xTaskCreate(callAPIServerGetLogLoss, "GetData", 40960, taskParams, 3, NULL) != pdPASS)
+          {
+            Serial.println("Failed to create task");
+            delete taskParams->msg;
+            delete taskParams;
+          }
+        }
+      }
+    }
+    else
+    {
+      Serial.println("Received message or queue is NULL.");
     }
   }
-}
-
-void sendDataCommand(String command, char *&param)
-{
-  char *tempdata = (char *)pvPortMalloc(ITEM_SIZE_RS485 * sizeof(char));
-  if (tempdata == NULL)
-  {
-    Serial.println("Error: Failed to allocate memory for tempdata");
-    strcpy(deviceStatus->status, "Failed Malock memory");
-    return;
-  }
-  // Serial.println("Lenh Commands: " +command);
-  // RS485Serial.flush(); // Đảm bảo bộ đệm truyền trước đó đã được xóa
-  Serial2.print(command); //, leng);
-  // Kiểm tra xem dữ liệu đã được gửi đi chưa
-  Serial2.flush(); // Đợi cho đến khi toàn bộ dữ liệu được truyền đi
-
-  // Kiểm tra lại bộ đệm truyền
-  if (Serial2.availableForWrite() < command.length())
-  {
-    Serial.println("Du lieu goi bi mat");
-  }
-  byte index = 0;
-
-  vTaskDelay(150 / portTICK_PERIOD_MS); // Thêm độ trễ ngắn trước khi đọc phản hồidf mặc định là 200
-  while (Serial2.available() > 0)
-  {
-    char currentChar = Serial2.read();
-    tempdata[index++] = currentChar;
-  }
-  tempdata[index++] = '\0';
-
-  // Serial.println(tempdata);
-
-  param = (char *)pvPortMalloc((index + 1) * sizeof(char)); // Cấp phát vùng nhớ mới đủ chứa dữ liệu
-  if (param != NULL)
-  {
-    strcpy(param, tempdata); // Sao chép dữ liệu
-    // Serial.print("data: "); Serial.println(param);
-  }
-  else
-  {
-    Serial.println("Error: Failed to allocate memory for param");
-    strcpy(deviceStatus->status, "Failed Malock memory");
-  }
-  // Giải phóng tempdata sau khi sao chép
-  vPortFree(tempdata);
 }
 
 /// @brief Hàm đọc và xử lý tín hiệu
@@ -245,72 +272,99 @@ void runCommandRs485(void *param)
 {
   TickType_t getTick;
   getTick = xTaskGetTickCount();
-  uint8_t buffer[LOG_SIZE];
+  byte buffer[LOG_SIZE];
+  unsigned long count = 0;
 
   while (true)
   {
+    count++;
     esp_task_wdt_reset();
-    if (!Serial2 || !Serial2.availableForWrite())
+    if (count % 2 == 0)
     {
-      Serial.println("Cổng Rs485 Chưa sẳn sàng\n");
-      vTaskDelay(500 / portTICK_PERIOD_MS);
-      // continue;
-    }
-    static String receivedString = ""; // Biến lưu chuỗi nhận được
-    static int counter = 0;            // Đếm số chuỗi đã xử lý
-    // Gọi hàm nhận dữ liệu
-    if (Serial2.available() > LOG_SIZE)
-    {
-      // Đọc 32 byte
-      Serial2.readBytes(buffer, LOG_SIZE);
-      // Kiểm tra checksum
-      uint8_t calculatedChecksum = calculateChecksum_LogData(buffer, LOG_SIZE);
-
-      PumpLog log;
-      log.checksum = buffer[29];
-      // Kiểm tra điều kiện log gởi lên có đúng hay ko
-      if (calculatedChecksum == log.checksum)
+      QueueHandle_t b = logIdLossQueue;
+      if (uxQueueMessagesWaiting(b) > 0)
       {
-
-        // Save Buffer Log in to Flash Esp32.
-
-        // Gán dữ liệu vào struct
-        ganLog(buffer, log);
-
-        String jsondata = convertPumpLogToJson(log);
-        // Allocate memory for JSON string using pvPortMalloc
-        char *jsonCopy = (char *)pvPortMalloc(jsondata.length() + 1);
-        if (jsonCopy != NULL)
+        Serial.print("NumLogsLoss: ");
+        Serial.println(uxQueueMessagesWaiting(b));
+        DtaLogLoss dataLogId;
+        if (xQueueReceive(logIdLossQueue, &dataLogId, 0))
         {
-          strcpy(jsonCopy, jsondata.c_str()); // Copy JSON string to allocated memory
-          // Send pointer to queue
-          if (xQueueSend(mqttQueue, &jsonCopy, pdMS_TO_TICKS(100)) != pdPASS)
-          {
-            Serial.println("Error: Failed to send JSON pointer to MQTT queue");
-            vPortFree(jsonCopy); // Free memory if not sent
-          }
-          else
-          {
-            Serial.println("JSON sent to queue successfully");
-          }
-        }
-        else
-        {
-          Serial.println("Error: Memory allocation failed");
+          Serial.printf("Da goi lenh xuong KPL: %d\n", dataLogId.Logid);
+          sendLogRequest(dataLogId.Logid);
+          vTaskDelay(100/ portTICK_PERIOD_MS);
+          readRs485(buffer);
         }
       }
     }
+    else
+    {
+      readRs485(buffer);
+    }
 
-    vTaskDelayUntil(&getTick, 100 / portTICK_PERIOD_MS);
+    vTaskDelayUntil(&getTick, 150 / portTICK_PERIOD_MS);
     continue;
   }
 }
 
-/// Kích hoạt lại relay để nhấn O-E để thực hiện việc in lại dữ liệu
-void getIdLogLoss(void *param)
+void readRs485(byte * buffer)
 {
-  Serial.println("Chuong trinh lay lop loss");
-  vTaskDelete(NULL);
+  if (!Serial2 || !Serial2.availableForWrite())
+  {
+    Serial.println("Cổng Rs485 Chưa sẳn sàng\n");
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    // continue;
+  }
+  static String receivedString = ""; // Biến lưu chuỗi nhận được
+  static int counter = 0;            // Đếm số chuỗi đã xử lý
+  // Gọi hàm nhận dữ liệu
+  if (Serial2.available()>0)
+  {
+    // Đọc 32 byte
+    Serial2.readBytes(buffer, LOG_SIZE);
+    // Kiểm tra checksum
+    uint8_t calculatedChecksum = calculateChecksum_LogData(buffer, LOG_SIZE);
+    // Serial.print("checkSumcalculatedChecksum = " + String(calculatedChecksum)+"\n");
+    PumpLog log;
+    log.checksum = buffer[30];
+    // Serial.print("CheckSum[30] = " + String(log.checksum)+"\n");
+
+    // for (int i = 0; i < LOG_SIZE; i++) {
+    //     Serial.print(buffer[i], HEX);
+    //     // int value = static_cast<int>(buffer[i]); // Convert byte to int
+    //     // Serial.print(value);
+    //     Serial.print(" "); // Thêm khoảng trắng giữa các byte
+    // }
+    // Serial.println(); // Kết thúc dòng
+    // Kiểm tra điều kiện log gởi lên có đúng hay ko
+    if (calculatedChecksum == log.checksum)
+    {
+      // Gán dữ liệu vào struct
+      ganLog(buffer, log);
+      String jsondata = convertPumpLogToJson(log);
+      // Serial.println(jsondata);
+      // Allocate memory for JSON string using pvPortMalloc
+      char *jsonCopy = (char *)pvPortMalloc(jsondata.length() + 1);
+      if (jsonCopy != NULL)
+      {
+        strcpy(jsonCopy, jsondata.c_str()); // Copy JSON string to allocated memory
+        // Send pointer to queue
+        if (xQueueSend(mqttQueue, &jsonCopy, pdMS_TO_TICKS(100)) != pdPASS)
+        {
+          Serial.println("Error: Failed to send JSON pointer to MQTT queue");
+          vPortFree(jsonCopy); // Free memory if not sent
+        }
+        else
+        {
+          // Serial.println("JSON sent to queue successfully");
+          // Serial.println(jsonCopy);
+        }
+      }
+      else
+      {
+        Serial.println("Error: Memory allocation failed");
+      }
+    }
+  }
 }
 
 /// @brief Task dùng để kiểm tra việc kết nối internet
@@ -369,13 +423,13 @@ void getInfoConnectMqtt()
   listFiles(flashMutex);
   delay(4000);
   // Cập nhật thông tin của các topic
-  strcpy(fullTopic, companyInfo->CompanyId);
-  strcpy(topicStatus, companyInfo->CompanyId);
-  strcpy(topicError, companyInfo->CompanyId);
-  strcpy(topicRestart, companyInfo->CompanyId);
-  strcpy(topicGetLogIdLoss, companyInfo->CompanyId);
-  strcpy(topicShift, companyInfo->CompanyId);
-  strcpy(topicChange, companyInfo->CompanyId);
+  strcpy(fullTopic, companyInfo->Mst);
+  strcpy(topicStatus, companyInfo->Mst);
+  strcpy(topicError, companyInfo->Mst);
+  strcpy(topicRestart, companyInfo->Mst);
+  strcpy(topicGetLogIdLoss, companyInfo->Mst);
+  strcpy(topicShift, companyInfo->Mst);
+  strcpy(topicChange, companyInfo->Mst);
 
   strcat(fullTopic, TopicSendData);
   strcat(topicStatus, TopicStatus);
@@ -397,14 +451,16 @@ void getInfoConnectMqtt()
 }
 
 // Hàm xử lý tất cả các vòi
-void processAllVoi(TimeSetup *time) {
-    for (int i = 0; i < numOfVoi; i++) {
-        uint8_t idVoi = idVoiList[i];
-        sendSetTimeCommand(idVoi, time); // Gửi lệnh cho ID vòi
-        delay(100);                // Chờ phản hồi từ thiết bị
-        readResponse(idVoi);       // Đọc phản hồi
-        delay(100);                // Chờ thêm để tránh xung đột
-    }
+void processAllVoi(TimeSetup *time)
+{
+  for (int i = 0; i < numOfVoi; i++)
+  {
+    uint8_t idVoi = idVoiList[i];
+    sendSetTimeCommand(idVoi, time); // Gửi lệnh cho ID vòi
+    vTaskDelay(100/ portTICK_PERIOD_MS);                      // Chờ phản hồi từ thiết bị
+    readResponse(idVoi);             // Đọc phản hồi
+    vTaskDelay(100/ portTICK_PERIOD_MS);                      // Chờ phản hồi từ thiết bị
+  }
 }
 /// @brief Check kết nối internet
 void checkInternetConnection()
@@ -421,5 +477,35 @@ void checkInternetConnection()
   {
     // Serial.println("Ping failed - No Internet connection");
     ethConnected = false;
+  }
+}
+
+void checkHeap()
+{
+  if (millis() - timer > 10000)
+  {
+    timer = millis();
+    deviceStatus->heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    deviceStatus->stack = uxTaskGetStackHighWaterMark(NULL);
+    deviceStatus->free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    deviceStatus->temperature = temperatureRead();
+    deviceStatus->counterReset = counterReset;
+    strcpy(deviceStatus->idDevice, TopicMqtt);
+    strcpy(deviceStatus->ipAddress, WiFi.localIP().toString().c_str());
+    // strcpy(deviceStatus->status, "Running");
+
+    JsonDocument doc;
+    doc["heap"] = deviceStatus->heap;
+    doc["stack"] = deviceStatus->stack;
+    doc["free"] = deviceStatus->free;
+    doc["temperature"] = deviceStatus->temperature;
+    doc["counterReset"] = deviceStatus->counterReset;
+    doc["idDevice"] = deviceStatus->idDevice;
+    doc["ipAddress"] = deviceStatus->ipAddress;
+    doc["status"] = deviceStatus->status;
+    String json;
+    serializeJson(doc, json);
+    client.publish(topicStatus, json.c_str());
+    // checkHeapIntegrity(); // Kiểm tra tính toàn vẹn của heap
   }
 }

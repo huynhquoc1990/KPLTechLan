@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include "structdata.h"
 #include <ArduinoJson.h>
+
+
 /// @brief Convert Settings hexa qua Settings String
 /// @param hexString
 /// @param settings
@@ -119,13 +121,40 @@ void parsePayload_IdLogStatus(byte *payload, unsigned int length, DeviceGetStatu
   strlcpy(deviceGetStatus->Idvoi, doc["Idvoi"] | "", sizeof(deviceGetStatus->Idvoi));
   strlcpy(deviceGetStatus->Request_Code, doc["Request_Code"] | "", sizeof(deviceGetStatus->Request_Code));
 }
+
+// Hàm để phân tích payload và gán vào struct GetIdLogLoss
+void parsePayload_IdLogLoss(byte *payload, unsigned int length, GetIdLogLoss *&getLogIdLoss, CompanyInfo *companyInfo) {
+  // Tạo một buffer cho payload để xử lý với ArduinoJson
+  char json[length + 1];
+  memcpy(json, payload, length);
+  json[length] = '\0'; // Đảm bảo chuỗi kết thúc
+
+  // Khởi tạo đối tượng JSON document
+  JsonDocument doc;
+
+  // Phân tích chuỗi JSON
+  DeserializationError error = deserializeJson(doc, json);
+  if (error) {
+    Serial.print("JSON parse failed: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  // Gán dữ liệu từ JSON vào các trường của getLogId
+  strlcpy(getLogIdLoss->Idvoi, doc["Idvoi"] | "", sizeof(getLogIdLoss->Idvoi));
+  strlcpy(getLogIdLoss->Request_Code, doc["Request_Code"] | "", sizeof(getLogIdLoss->Request_Code));
+  strlcpy(getLogIdLoss->Today, doc["Today"] | "", sizeof(getLogIdLoss->Today));
+  strlcpy(getLogIdLoss->CompanyId, doc["CompanyId"] | "", sizeof(companyInfo->Mst));
+}
+
 void setUpTime(TimeSetup *&currentTime,const tm timeinfo){
   // Gán lại giá trị vào struct TimeSetup
   currentTime->ngay = timeinfo.tm_mday;
-  currentTime->thang = timeinfo.tm_mon + 1;
-  currentTime->nam = timeinfo.tm_year + 1900;
+  currentTime->thang = timeinfo.tm_mon +1;
+  currentTime->nam = (timeinfo.tm_year + 1900)%100;
   currentTime->gio = timeinfo.tm_hour;
   currentTime->phut = timeinfo.tm_min;
   currentTime->giay = timeinfo.tm_sec;
 }
+
 #endif // STRUCTDATA_H
