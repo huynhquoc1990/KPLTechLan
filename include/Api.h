@@ -17,7 +17,7 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex)
   Settings settingsInFlash;
   readSettingsInFlash(settingsInFlash, flashMutex);
 
-  if (WiFi.status() != WL_CONNECTED)
+  if (WiFi.status() == WL_CONNECTED)
   {
     HTTPClient http;
     String url = "http://103.57.221.161:5002/companys-managerment/getMqttServer";
@@ -111,7 +111,7 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex)
 void callAPIServerGetCompanyInfo(void *param)
 {
   CompanyInfo *company = (CompanyInfo *)param;
-  if (WiFi.status() != WL_CONNECTED)
+  if (WiFi.status() == WL_CONNECTED)
   {
     HTTPClient http;
     String url = "http://103.57.221.161:5002/device-managerment/devices/infoid";
@@ -195,7 +195,7 @@ void callAPIServerGetLogLoss(void *param){
   // Serial.printf("Request_Code: %s\n", msg.Request_Code);
   // Serial.printf("CompanyId: %s\n", msg.CompanyId);
 
-  if (WiFi.status() != WL_CONNECTED)
+  if (WiFi.status() == WL_CONNECTED)
   {
     HTTPClient http;
     // Your API endpoint

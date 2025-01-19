@@ -86,6 +86,9 @@ void readRs485(uint8_t *);
 void ConnectWifiMqtt(void *parameter);
 eTaskState checkTaskState(TaskHandle_t taskHandle);
 
+
+bool statusConnected = false;
+
 /// @brief Hàm setup thiết lập các thông tin ban đầu
 void setup()
 {
@@ -141,6 +144,13 @@ void setup()
   // sendStartupCommand();
   xTaskCreate(ConnectWifiMqtt, "connectWifiMqtt", 8192, NULL, 1, &Handle_Wifi);
   // Cấu hình NTP
+  while (statusConnected==false)
+  {
+    vTaskDelay(100/ portTICK_PERIOD_MS);
+    Serial.print(".");
+  }
+  Serial.println("");
+  
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   // In ra thời gian ban đầu
   struct tm timeinfo;
@@ -161,7 +171,6 @@ void setup()
   xTaskCreate(mqttSendTask, "mqttSendTask", 8192, NULL, 3, &Handle_MqttSend);
 }
 
-bool statusConnected = false;
 unsigned long timer = 0;
 void loop()
 {
@@ -244,13 +253,13 @@ void ConnectWifiMqtt(void *parameter){
         listFiles(flashMutex);
         delay(4000);
         // Cập nhật thông tin của các topic
-        strcpy(fullTopic, companyInfo->CompanyId);
-        strcpy(topicStatus, companyInfo->CompanyId);
-        strcpy(topicError, companyInfo->CompanyId);
-        strcpy(topicRestart, companyInfo->CompanyId);
-        strcpy(topicGetLogIdLoss, companyInfo->CompanyId);
-        strcpy(topicShift, companyInfo->CompanyId);
-        strcpy(topicChange, companyInfo->CompanyId);
+        strcpy(fullTopic, companyInfo->Mst);
+        strcpy(topicStatus, companyInfo->Mst);
+        strcpy(topicError, companyInfo->Mst);
+        strcpy(topicRestart, companyInfo->Mst);
+        strcpy(topicGetLogIdLoss, companyInfo->Mst);
+        strcpy(topicShift, companyInfo->Mst);
+        strcpy(topicChange, companyInfo->Mst);
 
         strcat(fullTopic, TopicSendData);
         strcat(topicStatus, TopicStatus);
