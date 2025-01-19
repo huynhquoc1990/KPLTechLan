@@ -10,14 +10,14 @@
 
 /// @brief Hàm lấy thông tin từ server và kiểm tra nội dung có thay đổi trong flash hay không? Nếu có lưu mới
 /// @param settings
-void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex, bool &ethConnected)
+void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex)
 {
   // Settings *settings = (Settings *)param;
   // cần đọc data từ file companyInfo.txt lên trước
   Settings settingsInFlash;
   readSettingsInFlash(settingsInFlash, flashMutex);
 
-  if (ETH.linkUp())
+  if (WiFi.status() != WL_CONNECTED)
   {
     HTTPClient http;
     String url = "http://103.57.221.161:5002/companys-managerment/getMqttServer";
@@ -97,7 +97,7 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex, bo
   else
   {
     // convertFromHex(dataCompanyInfo, *company);
-    ethConnected = false;
+    // ethConnected = false;
     Serial.println("Khong ket noi duoc internet");
   }
 
@@ -111,7 +111,7 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex, bo
 void callAPIServerGetCompanyInfo(void *param)
 {
   CompanyInfo *company = (CompanyInfo *)param;
-  if (ETH.linkUp())
+  if (WiFi.status() != WL_CONNECTED)
   {
     HTTPClient http;
     String url = "http://103.57.221.161:5002/device-managerment/devices/infoid";
@@ -195,7 +195,7 @@ void callAPIServerGetLogLoss(void *param){
   // Serial.printf("Request_Code: %s\n", msg.Request_Code);
   // Serial.printf("CompanyId: %s\n", msg.CompanyId);
 
-  if (ETH.linkUp())
+  if (WiFi.status() != WL_CONNECTED)
   {
     HTTPClient http;
     // Your API endpoint

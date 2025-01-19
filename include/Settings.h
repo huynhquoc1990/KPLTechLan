@@ -40,9 +40,9 @@ const int   daylightOffset_sec = 3600;
     - Sửa lại mảng deviceCommands tùy vào trụ cài đặc.
     - Thay đổi số thiết bị kết nối: DeviceNumber mặc định là 5, nhưng thực tế chỉ đọc 3
 */
-const char* TopicMqtt =     "KPL2";
-// const char* wifi_ssid =     "Quoc Thu";   // Ctyanhthu
-// const char* wifi_password = "T@nqu0c1"; // atcsoft12345
+const char* TopicMqtt =     "VT-T01-V10";
+const char* wifi_ssid =     "QA_Gas";   // Ctyanhthu
+const char* wifi_password = "T@nqu0c1"; // atcsoft12345
 const char* TopicLogError = "/Error/";
 const char* TopicRestart  = "/Restart/";
 const char* TopicGetLogIdLoss = "/GetLogIdLoss/";

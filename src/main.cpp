@@ -31,7 +31,7 @@ byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED}; // Địa chỉ MAC duy nhấ
 WiFiClient ethClient;                              // Ethernet client
 PubSubClient client(ethClient);                    // MQTT client sử dụng Ethernet client
 // Biến trạng thái cho kết nối và các tác vụ
-bool ethConnected = false;
+// bool ethConnected = false;
 unsigned long counterReset = 0;
 bool ethPreviouslyConnected = false; // Cờ kiểm tra trạng thái kết nối trước đó
 
@@ -66,7 +66,8 @@ SemaphoreHandle_t flashMutex;
 TaskHandle_t Handle_Rs485 = NULL;
 TaskHandle_t Handle_MqttSend = NULL;
 TaskHandle_t getIdLogLossHandle = NULL;
-TaskHandle_t ethernetTaskhandle = NULL;
+// TaskHandle_t ethernetTaskhandle = NULL;
+TaskHandle_t Handle_Wifi = NULL;
 
 // Function prototypes
 void formatLittleFS();
@@ -74,7 +75,7 @@ void runCommandRs485(void *parameter);
 void parseAndConvertToJson(String input);
 void mqttCallback(char *topic, byte *payload, unsigned int length);
 void getIdLogLoss(void *param);
-void ethernetTask(void *pvParameters);
+// void ethernetTask(void *pvParameters);
 void getInfoConnectMqtt();
 void checkInternetConnection();
 void sendDataCommand(String command, char *&param);
@@ -82,6 +83,8 @@ void processAllVoi(TimeSetup *time); // Xử lý tất cả các ID vòi
 void mqttSendTask(void *parameter);
 void checkHeap();
 void readRs485(uint8_t *);
+void ConnectWifiMqtt(void *parameter);
+eTaskState checkTaskState(TaskHandle_t taskHandle);
 
 /// @brief Hàm setup thiết lập các thông tin ban đầu
 void setup()
@@ -93,19 +96,20 @@ void setup()
   Serial2.begin(RS485BaudRate, SERIAL_8N1, RX_PIN, TX_PIN);
 
   // Khởi động Ethernet
-  Serial.println("Initializing Ethernet...");
-  ETH.begin(ETH_ADDR, ETH_POWER_PIN, ETH_MDC_PIN, ETH_MDIO_PIN, ETH_TYPE, ETH_CLK_MODE);
+  // Serial.println("Initializing Ethernet...");
+  // ETH.begin(ETH_ADDR, ETH_POWER_PIN, ETH_MDC_PIN, ETH_MDIO_PIN, ETH_TYPE, ETH_CLK_MODE);
 
-  // Chờ Ethernet kết nối
-  while (!ETH.linkUp())
-  {
-    Serial.println("Waiting for Ethernet connection...");
-    delay(1000);
-  }
+  // // Chờ Ethernet kết nối
+  // while (!ETH.linkUp())
+  // {
+  //   Serial.println("Waiting for Ethernet connection...");
+  //   delay(1000);
+  // }
 
   // Hiển thị thông tin kết nối
-  Serial.print("Connected! IP address: ");
-  Serial.println(ETH.localIP());
+  // Serial.print("Connected! IP address: ");
+  // Serial.println(ETH.localIP());
+  WiFi.mode(WIFI_STA);
 
   // Cấu hình MQTT server (thay thế bằng địa chỉ MQTT Broker của bạn)
   client.setServer(mqttServer, 1883);
@@ -126,15 +130,16 @@ void setup()
 
   Serial.println("Setup finished");
   // KIỂM TRA INTERNET CÓ ĐỂ LẤY THỜI GIAN THỰC
-  while (!ethConnected)
-  {
-    Serial.print(".");
-    checkInternetConnection();
-    delay(1000);
-  }
+  // while (!ethConnected)
+  // {
+  //   Serial.print(".");
+  //   checkInternetConnection();
+  //   delay(1000);
+  // }
 
-  Serial.println(" ");
-  sendStartupCommand();
+  // Serial.println(" ");
+  // sendStartupCommand();
+  xTaskCreate(ConnectWifiMqtt, "connectWifiMqtt", 8192, NULL, 1, &Handle_Wifi);
   // Cấu hình NTP
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   // In ra thời gian ban đầu
@@ -151,11 +156,12 @@ void setup()
   // Thông báo KPL ESP32 đã sẵn sàng
   sendStartupCommand();
 
-  xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
+  // xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
   xTaskCreate(runCommandRs485, "runCommandRs485", 8192, NULL, 2, &Handle_Rs485);
   xTaskCreate(mqttSendTask, "mqttSendTask", 8192, NULL, 3, &Handle_MqttSend);
 }
 
+bool statusConnected = false;
 unsigned long timer = 0;
 void loop()
 {
@@ -163,16 +169,147 @@ void loop()
   checkHeap();
 
   // Kiểm tra thông tin của thiết bị cơ bản: Head memory
-
-  if (ETH.linkUp() && ethConnected)
+  if (client.connected())
   {
-    /* code */
     client.loop();
+    if (statusConnected == true)
+    {
+      // Kích hoạt lại các task cần thiết
+      if (checkTaskState(Handle_MqttSend) == eSuspended)
+      {
+        vTaskResume(Handle_MqttSend);
+      }
+      vTaskSuspend(Handle_Wifi);
+      statusConnected = false;
+    }
+  }
+  else
+  {
+
+    if (checkTaskState(Handle_MqttSend) != eSuspended)
+    {
+      vTaskSuspend(Handle_MqttSend);
+    }
+    // Kích hoạt lại task ConnectWifiMqtt
+    if (checkTaskState(Handle_Wifi) == eSuspended && statusConnected == false)
+    {
+      vTaskResume(Handle_Wifi);
+    }
   }
 
   esp_task_wdt_reset();
   vTaskDelay(100 / portTICK_PERIOD_MS);
   yield();
+}
+
+eTaskState checkTaskState(TaskHandle_t taskHandle){
+  eTaskState state = eTaskGetState(taskHandle);
+  return state;
+}
+
+/// @brief hàm kết nối Wifi và Mqtt
+/// @param parameter
+void ConnectWifiMqtt(void *parameter){
+  int retryConenct = 0;
+  while (true)
+  {
+    if (WiFi.status() != WL_CONNECTED)
+    {
+      Serial.println("Connecting to WiFi... " + retryConenct);
+      WiFi.begin(wifi_ssid, wifi_password);
+      // Đợi kết nối hoặc timeout
+      int retryCount = 0;
+      while (WiFi.status() != WL_CONNECTED && retryCount < 30)
+      {
+        esp_task_wdt_reset();
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        Serial.print(".");
+        retryCount++;
+      }
+      if (WiFi.status() == WL_CONNECTED)
+      {
+        Serial.println("\nWiFi connected");
+        Serial.print("IP Address: ");
+        Serial.println(WiFi.localIP());
+
+        Serial.println("get data from server Settings MQTT");
+        callAPIGetSettingsMqtt(settings, flashMutex);
+        Serial.println(settings->MqttServer);
+        Serial.println(settings->PortMqtt);
+        client.setServer(settings->MqttServer, settings->PortMqtt);
+        delay(1000);
+
+        Serial.println("get data from server Company information");
+        xTaskCreate(callAPIServerGetCompanyInfo, "getCompanyInfo", 2048, companyInfo, 2, NULL);
+        listFiles(flashMutex);
+        delay(4000);
+        // Cập nhật thông tin của các topic
+        strcpy(fullTopic, companyInfo->CompanyId);
+        strcpy(topicStatus, companyInfo->CompanyId);
+        strcpy(topicError, companyInfo->CompanyId);
+        strcpy(topicRestart, companyInfo->CompanyId);
+        strcpy(topicGetLogIdLoss, companyInfo->CompanyId);
+        strcpy(topicShift, companyInfo->CompanyId);
+        strcpy(topicChange, companyInfo->CompanyId);
+
+        strcat(fullTopic, TopicSendData);
+        strcat(topicStatus, TopicStatus);
+        strcat(topicError, TopicLogError);
+        strcat(topicRestart, TopicRestart);
+        strcat(topicGetLogIdLoss, TopicGetLogIdLoss);
+        // strcat(topicGetLogIdLoss, TopicGetLogIdLoss);
+        strcat(topicShift, TopicShift);
+        strcat(topicChange, TopicChange);
+
+        // Nối chuỗi thứ hai vào mảng
+        strcat(fullTopic, TopicMqtt);
+        strcat(topicStatus, TopicMqtt);
+        // strcat(topicGetLogIdLoss, TopicMqtt);
+        
+        Serial.println(fullTopic);
+        Serial.println(topicGetLogIdLoss);
+        Serial.println(companyInfo->CompanyId);
+        
+      }
+      else
+      {
+        Serial.println("\nWiFi connection failed, retrying...");
+        retryConenct++;
+        if (retryCount > 3)
+          ESP.restart();
+        vTaskDelay(pdMS_TO_TICKS(5000)); // Đợi trước khi thử lại
+        continue;
+      }
+    }
+    // Kết nối MQTT
+    if (!client.connected())
+    {
+      // get data from server
+      esp_task_wdt_reset();
+      Serial.println("Connecting to MQTT...");
+      if (client.connect(TopicMqtt, mqttUser, mqttPassword))
+      {
+        Serial.println("MQTT connected");
+        client.subscribe(topicError);
+        client.subscribe(topicRestart);
+        client.subscribe(topicGetLogIdLoss);
+        client.subscribe(topicChange);
+        client.subscribe(topicShift);
+        delay(1000);
+        statusConnected = true;
+        // Thực hiện việc gọi API để lấy dữ liệu có Id bị loss
+        // Đăng ký các topic
+      }
+      else
+      {
+        Serial.println("MQTT connection failed, retrying...");
+        vTaskDelay(pdMS_TO_TICKS(5000)); // Đợi trước khi thử lại
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Chờ trước khi kiểm tra lại kết nối
+  }
+  esp_task_wdt_reset();
+  vTaskDelete(NULL);
 }
 
 void mqttSendTask(void *parameter)
@@ -327,14 +464,6 @@ void readRs485(byte * buffer)
     PumpLog log;
     log.checksum = buffer[30];
     // Serial.print("CheckSum[30] = " + String(log.checksum)+"\n");
-
-    // for (int i = 0; i < LOG_SIZE; i++) {
-    //     Serial.print(buffer[i], HEX);
-    //     // int value = static_cast<int>(buffer[i]); // Convert byte to int
-    //     // Serial.print(value);
-    //     Serial.print(" "); // Thêm khoảng trắng giữa các byte
-    // }
-    // Serial.println(); // Kết thúc dòng
     // Kiểm tra điều kiện log gởi lên có đúng hay ko
     if (calculatedChecksum == log.checksum)
     {
@@ -367,52 +496,54 @@ void readRs485(byte * buffer)
   }
 }
 
+
+
 /// @brief Task dùng để kiểm tra việc kết nối internet
 /// @param pvParameters
-void ethernetTask(void *pvParameters)
-{
-  while (true)
-  {
-    checkInternetConnection();
-    if (ETH.linkUp() && ethConnected && !ethPreviouslyConnected)
-    {
-      getInfoConnectMqtt();
-      ethPreviouslyConnected = true; // Cập nhật trạng thái đã kết nối
-      Serial.println("Ethernet connected on interneted");
+// void ethernetTask(void *pvParameters)
+// {
+//   while (true)
+//   {
+//     checkInternetConnection();
+//     if (ETH.linkUp() && ethConnected && !ethPreviouslyConnected)
+//     {
+//       getInfoConnectMqtt();
+//       ethPreviouslyConnected = true; // Cập nhật trạng thái đã kết nối
+//       Serial.println("Ethernet connected on interneted");
 
-      Serial.println("Connecting to MQTT...");
-      if (client.connect(TopicMqtt, mqttUser, mqttPassword))
-      {
-        Serial.println("MQTT connected");
-        client.subscribe(topicError);
-        client.subscribe(topicRestart);
-        client.subscribe(topicGetLogIdLoss);
-        client.subscribe(topicChange);
-        client.subscribe(topicShift);
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Đợi trước khi thử lại
-      }
-      else
-      {
-        Serial.println("MQTT connection failed, retrying...");
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Đợi trước khi thử lại
-      }
-      // vTaskSuspend(wifiTaskHandle);  // Tạm dừng task WiFi khi Ethernet đã kết nối
-    }
-    else if (!ETH.linkUp() && ethPreviouslyConnected)
-    {
-      client.disconnect();
-      ethPreviouslyConnected = false; // Cập nhật trạng thái mất kết nối
-      Serial.println("Ethernet disconnected.");
-      // vTaskResume(wifiTaskHandle);  // Kích hoạt task WiFi khi Ethernet bị ngắt
-    }
-    vTaskDelay(10000 / portTICK_PERIOD_MS); // Chờ 1 giây
-  }
-}
+//       Serial.println("Connecting to MQTT...");
+//       if (client.connect(TopicMqtt, mqttUser, mqttPassword))
+//       {
+//         Serial.println("MQTT connected");
+//         client.subscribe(topicError);
+//         client.subscribe(topicRestart);
+//         client.subscribe(topicGetLogIdLoss);
+//         client.subscribe(topicChange);
+//         client.subscribe(topicShift);
+//         vTaskDelay(pdMS_TO_TICKS(1000)); // Đợi trước khi thử lại
+//       }
+//       else
+//       {
+//         Serial.println("MQTT connection failed, retrying...");
+//         vTaskDelay(pdMS_TO_TICKS(5000)); // Đợi trước khi thử lại
+//       }
+//       // vTaskSuspend(wifiTaskHandle);  // Tạm dừng task WiFi khi Ethernet đã kết nối
+//     }
+//     else if (!ETH.linkUp() && ethPreviouslyConnected)
+//     {
+//       client.disconnect();
+//       ethPreviouslyConnected = false; // Cập nhật trạng thái mất kết nối
+//       Serial.println("Ethernet disconnected.");
+//       // vTaskResume(wifiTaskHandle);  // Kích hoạt task WiFi khi Ethernet bị ngắt
+//     }
+//     vTaskDelay(10000 / portTICK_PERIOD_MS); // Chờ 1 giây
+//   }
+// }
 /// @brief
 void getInfoConnectMqtt()
-{
+{ 
   Serial.println("get data from server Settings MQTT");
-  callAPIGetSettingsMqtt(settings, flashMutex, ethConnected);
+  callAPIGetSettingsMqtt(settings, flashMutex);
   Serial.println(settings->MqttServer);
   Serial.println(settings->PortMqtt);
   client.setServer(settings->MqttServer, settings->PortMqtt);
@@ -463,22 +594,22 @@ void processAllVoi(TimeSetup *time)
   }
 }
 /// @brief Check kết nối internet
-void checkInternetConnection()
-{
-  IPAddress ip(103, 57, 221, 161); // Google DNS
-  int pingResult = Ping.ping(ip);
-  // Serial.print("Ping: "); Serial.println(pingResult);
-  if (pingResult > 0)
-  {
-    // Serial.println("Ping successful - Internet is connected");
-    ethConnected = true;
-  }
-  else
-  {
-    // Serial.println("Ping failed - No Internet connection");
-    ethConnected = false;
-  }
-}
+// void checkInternetConnection()
+// {
+//   IPAddress ip(103, 57, 221, 161); // Google DNS
+//   int pingResult = Ping.ping(ip);
+//   // Serial.print("Ping: "); Serial.println(pingResult);
+//   if (pingResult > 0)
+//   {
+//     // Serial.println("Ping successful - Internet is connected");
+//     ethConnected = true;
+//   }
+//   else
+//   {
+//     // Serial.println("Ping failed - No Internet connection");
+//     ethConnected = false;
+//   }
+// }
 
 void checkHeap()
 {
