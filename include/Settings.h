@@ -10,6 +10,12 @@
 #define OUT2                2
 #define INPUT1              36
 #define FLASH_DATA_FILE "/log.bin" // File lưu dữ liệu log
+// File lưu thông tin trên LittleFS
+const char* configFile = "/config.txt";
+// Định nghĩa tên đăng nhập và mật khẩu cho trang cấu hình
+const char* adminUser = "admin";
+const char* adminPass = "Qu0c@nh1";
+
 
 // Thông tin hệ thống mqtt
 
@@ -40,9 +46,15 @@ const int   daylightOffset_sec = 3600;
     - Sửa lại mảng deviceCommands tùy vào trụ cài đặc.
     - Thay đổi số thiết bị kết nối: DeviceNumber mặc định là 5, nhưng thực tế chỉ đọc 3
 */
-const char* TopicMqtt =     "VT-T02-V10";
-const char* wifi_ssid =     "VT4";   // Ctyanhthu
-const char* wifi_password = "vt123456"; // atcsoft12345
+// char* TopicMqtt =     "QA-T01-V01";
+// char* wifi_ssid =     "Quoc Thu";   // Ctyanhthu
+// char* wifi_password = "T@nqu0c1"; // atcsoft12345
+
+// Khai báo SSID và Password mặc định
+char TopicMqtt[32] = "QA-T01-V01"; // SSID mặc định
+char wifi_ssid[32] = "Quoc Thu"; // SSID mặc định
+char wifi_password[64] = "T@nqu0c1";     // Mật khẩu mặc định (rỗng)
+
 const char* TopicLogError = "/Error/";
 const char* TopicRestart  = "/Restart/";
 const char* TopicGetLogIdLoss = "/GetLogIdLoss/";

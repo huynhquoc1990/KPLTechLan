@@ -7,6 +7,41 @@
 #include <freertos/semphr.h>
 #include "Inits.h"
 
+// Hàm đọc thông tin từ file
+String readFileConfig(const char* path) {
+  if (!LittleFS.begin()) {
+    Serial.println("Không thể khởi tạo LittleFS");
+    return "";
+  }
+
+  File file = LittleFS.open(path, "r");
+  if (!file) {
+    Serial.println("Không thể mở file để đọc");
+    return "";
+  }
+
+  String content = file.readString();
+  file.close();
+  return content;
+}
+
+// Hàm ghi thông tin vào file
+void writeFileConfig(const char* path, const String& data) {
+  if (!LittleFS.begin()) {
+    Serial.println("Không thể khởi tạo LittleFS");
+    return;
+  }
+
+  File file = LittleFS.open(path, "w");
+  if (!file) {
+    Serial.println("Không thể mở file để ghi");
+    return;
+  }
+
+  file.print(data);
+  file.close();
+}
+
 /// @brief Hàm đọc thông tin lưu dữ liệu trong flash
 void listFiles(SemaphoreHandle_t flashMutex)
 {

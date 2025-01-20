@@ -244,6 +244,8 @@ void callAPIServerGetLogLoss(void *param){
                 Serial.println("IdLog node add");
             }
           }
+        }else {
+          Serial.println("No Data Fined");
         }
       }
       else

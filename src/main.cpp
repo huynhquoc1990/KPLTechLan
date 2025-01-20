@@ -23,6 +23,8 @@
 #include <Inits.h>
 #include <Api.h>
 #include <TTL.h>
+#include <WebServer.h>
+#include "Webservice.h"
 
 // Khởi tạo client
 
@@ -85,33 +87,25 @@ void checkHeap();
 void readRs485(uint8_t *);
 void ConnectWifiMqtt(void *parameter);
 eTaskState checkTaskState(TaskHandle_t taskHandle);
+void webServerTask(void *parameter);
 
 
 bool statusConnected = false;
+
+// Khởi tạo WebServer
+WebServer server(80);
+// Biến để kiểm tra trạng thái đăng nhập
+bool isLoggedIn = false;
 
 /// @brief Hàm setup thiết lập các thông tin ban đầu
 void setup()
 {
   Serial.begin(115200);
-  esp_task_wdt_init(25, true);
+  esp_task_wdt_init(60, true);
   esp_task_wdt_add(NULL); // Thêm các nhiệm vụ bạn muốn giám sát, NULL để giám sát tất cả nhiệm vụ
   // Initialize RS485
   Serial2.begin(RS485BaudRate, SERIAL_8N1, RX_PIN, TX_PIN);
-
-  // Khởi động Ethernet
-  // Serial.println("Initializing Ethernet...");
-  // ETH.begin(ETH_ADDR, ETH_POWER_PIN, ETH_MDC_PIN, ETH_MDIO_PIN, ETH_TYPE, ETH_CLK_MODE);
-
-  // // Chờ Ethernet kết nối
-  // while (!ETH.linkUp())
-  // {
-  //   Serial.println("Waiting for Ethernet connection...");
-  //   delay(1000);
-  // }
-
-  // Hiển thị thông tin kết nối
-  // Serial.print("Connected! IP address: ");
-  // Serial.println(ETH.localIP());
+  // Khởi động Wifi
   WiFi.mode(WIFI_STA);
 
   // Cấu hình MQTT server (thay thế bằng địa chỉ MQTT Broker của bạn)
@@ -130,23 +124,16 @@ void setup()
   // Tính toán currentId từ kích thước file log
   currentId = initializeCurrentId(flashMutex);
   Serial.printf("Log read successfully for ID: %u\n", currentId);
-
   Serial.println("Setup finished");
-  // KIỂM TRA INTERNET CÓ ĐỂ LẤY THỜI GIAN THỰC
-  // while (!ethConnected)
-  // {
-  //   Serial.print(".");
-  //   checkInternetConnection();
-  //   delay(1000);
-  // }
 
-  // Serial.println(" ");
-  // sendStartupCommand();
+  xTaskCreate(webServerTask, "webServerTask", 8192, NULL, 1, NULL);
+
   xTaskCreate(ConnectWifiMqtt, "connectWifiMqtt", 8192, NULL, 1, &Handle_Wifi);
   // Cấu hình NTP
   while (statusConnected==false)
   {
     vTaskDelay(100/ portTICK_PERIOD_MS);
+    esp_task_wdt_reset();
     Serial.print(".");
   }
   Serial.println("");
@@ -169,6 +156,7 @@ void setup()
   // xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
   xTaskCreate(runCommandRs485, "runCommandRs485", 8192, NULL, 2, &Handle_Rs485);
   xTaskCreate(mqttSendTask, "mqttSendTask", 8192, NULL, 3, &Handle_MqttSend);
+  
 }
 
 unsigned long timer = 0;
@@ -194,7 +182,7 @@ void loop()
   }
   else
   {
-
+    Serial.println("Loss connect wifi");
     if (checkTaskState(Handle_MqttSend) != eSuspended)
     {
       vTaskSuspend(Handle_MqttSend);
@@ -216,17 +204,70 @@ eTaskState checkTaskState(TaskHandle_t taskHandle){
   return state;
 }
 
+// Task chạy webserver
+void webServerTask(void *parameter) {
+    if (!LittleFS.begin()) {
+        Serial.println("Không thể khởi tạo LittleFS");
+        vTaskDelete(NULL); // Xóa task nếu không khởi tạo được LittleFS
+        return;
+    }
+
+    // Đọc dữ liệu cấu hình
+    
+    WiFi.softAP("KPL-Qa-Gas-Device", "Qu0c@nh1");
+    // Serial.println("Wi-Fi AP đã được kích hoạt. SSID: ESP32_Config, Mật khẩu: 12345678");
+
+    // Cài đặt các route cho web server
+    server.on("/", [](){handleRoot(&server, isLoggedIn);});
+    server.on("/login", HTTP_POST, []() {handleLogin(&server, isLoggedIn);});
+    server.on("/logout", [](){handleLogout(&server, isLoggedIn);});
+    // Định nghĩa route với lambda
+    server.on("/save", HTTP_POST, []() {
+      handleSave(&server, isLoggedIn);
+    });
+    server.begin();
+    Serial.println("Web server đã sẵn sàng!");
+
+    // Vòng lặp để xử lý yêu cầu web
+    while (true) {
+        server.handleClient();
+        vTaskDelay(100/ portTICK_PERIOD_MS); // Để tránh CPU bị quá tải
+        esp_task_wdt_reset();
+    }
+}
+
 /// @brief hàm kết nối Wifi và Mqtt
 /// @param parameter
 void ConnectWifiMqtt(void *parameter){
   int retryConenct = 0;
+
+  String configData = readFileConfig("/config.txt");
+  if (configData != "") {
+      // Không có dữ liệu cấu hình, bật chế độ AP
+      // Có dữ liệu cấu hình, kết nối Wi-Fi
+      int split1 = configData.indexOf('\n');
+      int split2 = configData.lastIndexOf('\n');
+
+      String ssid = configData.substring(0, split1);
+      String password = configData.substring(split1 + 1, split2);
+      String topic = configData.substring(split2 + 1);
+      Serial.printf("wifi: %s, Pass: %s, TopicMqtt: %s", ssid, password, topic);
+      // Ghi đè SSID và Password mặc định
+      strncpy(wifi_ssid, ssid.c_str(), sizeof(wifi_ssid) - 1);
+      strncpy(wifi_password, password.c_str(), sizeof(wifi_password) - 1);
+      strncpy(TopicMqtt, topic.c_str(), sizeof(TopicMqtt) - 1);
+
+      wifi_ssid[sizeof(wifi_ssid) - 1] = '\0';   // Đảm bảo chuỗi kết thúc
+      wifi_password[sizeof(wifi_password) - 1] = '\0'; // Đảm bảo chuỗi kết thúc
+      TopicMqtt[sizeof(TopicMqtt) - 1] = '\0'; // Đảm bảo chuỗi kết thúc
+  }
+  
   while (true)
   {
     if (WiFi.status() != WL_CONNECTED)
     {
       Serial.println("Connecting to WiFi... " + retryConenct);
       WiFi.begin(wifi_ssid, wifi_password);
-      // Đợi kết nối hoặc timeout
       int retryCount = 0;
       while (WiFi.status() != WL_CONNECTED && retryCount < 30)
       {
@@ -274,11 +315,9 @@ void ConnectWifiMqtt(void *parameter){
         strcat(fullTopic, TopicMqtt);
         strcat(topicStatus, TopicMqtt);
         // strcat(topicGetLogIdLoss, TopicMqtt);
-        
         Serial.println(fullTopic);
         Serial.println(topicGetLogIdLoss);
         Serial.println(companyInfo->CompanyId);
-        
       }
       else
       {
@@ -323,46 +362,69 @@ void ConnectWifiMqtt(void *parameter){
 
 void mqttSendTask(void *parameter)
 {
+  TickType_t getTick;
+  getTick = xTaskGetTickCount();
   char *data; // Dữ liệu lấy từ hàng đợi
-Serial.println("Started task mqtt send");
-
-while (true)
-{
-  // Nhận dữ liệu từ hàng đợi
-  if (xQueueReceive(mqttQueue, &data, pdMS_TO_TICKS(500)))
+  Serial.println("Started task mqtt send");
+  // Biến đếm thời gian
+  int elapsedSeconds = 0;
+  const int interval = 300; // 300 giây = 5 phút
+    // Biến đánh dấu dữ liệu được gửi lên
+  bool dataReceived = false;
+  while (true)
   {
-    int retryCount = 0;         // Số lần thử lại
-    const int maxRetries = 3;  // Giới hạn số lần thử lại
-
-    while (retryCount < maxRetries)
+    // Nhận dữ liệu từ hàng đợi
+    if (xQueueReceive(mqttQueue, &data, pdMS_TO_TICKS(500)))
     {
-      // Thử gửi dữ liệu qua MQTT
-      if (client.publish(fullTopic, data))
+      int retryCount = 0;         // Số lần thử lại
+      const int maxRetries = 3;  // Giới hạn số lần thử lại
+      elapsedSeconds = 0;
+      dataReceived = true; // Dữ liệu được gửi lên
+      while (retryCount < maxRetries)
       {
-        Serial.printf("MQTT sent successfully: %s\n", data);
-        vPortFree(data); // Giải phóng bộ nhớ sau khi gửi thành công
-        break; // Thoát vòng lặp retry khi gửi thành công
+        // Thử gửi dữ liệu qua MQTT
+        if (client.publish(fullTopic, data))
+        {
+          Serial.printf("MQTT sent successfully: %s\n", data);
+          vPortFree(data); // Giải phóng bộ nhớ sau khi gửi thành công
+          break; // Thoát vòng lặp retry khi gửi thành công
+        }
+        else
+        {
+          Serial.printf("MQTT send failed (Attempt %d/%d)\n", retryCount + 1, maxRetries);
+          retryCount++;
+          vTaskDelay(500 / portTICK_PERIOD_MS); // Đợi trước khi thử lại
+        }
       }
-      else
-      {
-        Serial.printf("MQTT send failed (Attempt %d/%d)\n", retryCount + 1, maxRetries);
-        retryCount++;
-        vTaskDelay(500 / portTICK_PERIOD_MS); // Đợi trước khi thử lại
-      }
-    }
 
-    // Nếu vượt quá số lần thử lại, xử lý lỗi
-    if (retryCount == maxRetries)
-    {
-      Serial.println("Error: MQTT send failed after maximum retries. Discarding data.");
-      vPortFree(data); // Giải phóng bộ nhớ nếu không thể xử lý dữ liệu
-    }
+      // Nếu vượt quá số lần thử lại, xử lý lỗi
+      if (retryCount == maxRetries)
+      {
+        Serial.println("Error: MQTT send failed after maximum retries. Discarding data.");
+        vPortFree(data); // Giải phóng bộ nhớ nếu không thể xử lý dữ liệu
+      }
+    }else {
+        // Không có dữ liệu, tăng thời gian đếm
+        elapsedSeconds += 1; // Tăng 1 giây cho mỗi chu kỳ
+
+        // Nếu đủ 5 phút và không có dữ liệu được gửi lên
+        if (elapsedSeconds >= interval)
+        {
+          if (!dataReceived)
+          {
+            Serial.println("Không có dữ liệu trong 5 phút, gửi lệnh xuống...");
+            sendStartupCommand();
+          }
+
+          // Reset biến đánh dấu và bộ đếm thời gian
+          dataReceived = false;
+          elapsedSeconds = 0;
+        }
+      }
+
+    // Chờ trước khi tiếp tục vòng lặp
+    vTaskDelayUntil(&getTick, 100 / portTICK_PERIOD_MS);
   }
-
-  // Chờ trước khi tiếp tục vòng lặp
-  vTaskDelay(100 / portTICK_PERIOD_MS);
-}
-
 }
 
 /// @brief Hàm này đọc thông tin phản hồi về từ mqtt publicer
@@ -420,7 +482,6 @@ void runCommandRs485(void *param)
   getTick = xTaskGetTickCount();
   byte buffer[LOG_SIZE];
   unsigned long count = 0;
-
   while (true)
   {
     count++;

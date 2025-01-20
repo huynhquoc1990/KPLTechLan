@@ -31,7 +31,6 @@ void sendLogRequest(uint16_t logPosition) {
 
     // Gửi toàn bộ buffer
     Serial2.write(buffer, sizeof(buffer));
-
     // In dữ liệu để kiểm tra
     Serial.println();
     Serial.print("Data sent: ");
