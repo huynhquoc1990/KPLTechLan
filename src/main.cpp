@@ -1,5 +1,5 @@
 #include <Wire.h>
-#include <ETH.h>
+// #include <ETH.h>
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -154,7 +154,7 @@ void setup()
   sendStartupCommand();
 
   // xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
-  xTaskCreate(runCommandRs485, "runCommandRs485", 8192, NULL, 2, &Handle_Rs485);
+  xTaskCreate(runCommandRs485, "runCommandRs485", 16384, NULL, 2, &Handle_Rs485);
   xTaskCreate(mqttSendTask, "mqttSendTask", 8192, NULL, 3, &Handle_MqttSend);
   
 }
@@ -364,7 +364,7 @@ void mqttSendTask(void *parameter)
 {
   TickType_t getTick;
   getTick = xTaskGetTickCount();
-  char *data; // Dữ liệu lấy từ hàng đợi
+  String data = ""; // Dữ liệu lấy từ hàng đợi
   Serial.println("Started task mqtt send");
   // Biến đếm thời gian
   int elapsedSeconds = 0;
@@ -373,6 +373,7 @@ void mqttSendTask(void *parameter)
   bool dataReceived = false;
   while (true)
   {
+    // Serial.print("Vao day nha");
     // Nhận dữ liệu từ hàng đợi
     if (xQueueReceive(mqttQueue, &data, pdMS_TO_TICKS(500)))
     {
@@ -383,10 +384,9 @@ void mqttSendTask(void *parameter)
       while (retryCount < maxRetries)
       {
         // Thử gửi dữ liệu qua MQTT
-        if (client.publish(fullTopic, data))
+        if (client.publish(fullTopic, data.c_str()))
         {
-          Serial.printf("MQTT sent successfully: %s\n", data);
-          vPortFree(data); // Giải phóng bộ nhớ sau khi gửi thành công
+          Serial.printf("MQTT sent successfully: %s\n", data.c_str());
           break; // Thoát vòng lặp retry khi gửi thành công
         }
         else
@@ -401,7 +401,6 @@ void mqttSendTask(void *parameter)
       if (retryCount == maxRetries)
       {
         Serial.println("Error: MQTT send failed after maximum retries. Discarding data.");
-        vPortFree(data); // Giải phóng bộ nhớ nếu không thể xử lý dữ liệu
       }
     }else {
         // Không có dữ liệu, tăng thời gian đếm
@@ -437,7 +436,8 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   Serial.println(topic);
   if (strcmp(topic, topicRestart) == 0)
   {
-    ESP.restart();
+    // ESP.restart();
+    Serial.print("Restart\n");
   }
   if (strcmp(topic, topicError) == 0)
   {
@@ -505,11 +505,12 @@ void runCommandRs485(void *param)
     }
     else
     {
+      // Serial.println("Vao doc RS485");
       readRs485(buffer);
     }
 
-    vTaskDelayUntil(&getTick, 150 / portTICK_PERIOD_MS);
-    continue;
+    vTaskDelay(150 / portTICK_PERIOD_MS);
+    // continue;
   }
 }
 
@@ -530,7 +531,7 @@ void readRs485(byte * buffer)
     Serial2.readBytes(buffer, LOG_SIZE);
     // Kiểm tra checksum
     uint8_t calculatedChecksum = calculateChecksum_LogData(buffer, LOG_SIZE);
-    // Serial.print("checkSumcalculatedChecksum = " + String(calculatedChecksum)+"\n");
+    Serial.print("checkSumcalculatedChecksum = " + String(calculatedChecksum)+"\n");
     PumpLog log;
     log.checksum = buffer[30];
     // Serial.print("CheckSum[30] = " + String(log.checksum)+"\n");
@@ -541,26 +542,14 @@ void readRs485(byte * buffer)
       ganLog(buffer, log);
       String jsondata = convertPumpLogToJson(log);
       // Serial.println(jsondata);
-      // Allocate memory for JSON string using pvPortMalloc
-      char *jsonCopy = (char *)pvPortMalloc(jsondata.length() + 1);
-      if (jsonCopy != NULL)
+      if (xQueueSend(mqttQueue, &jsondata, pdMS_TO_TICKS(300)) != pdPASS)
       {
-        strcpy(jsonCopy, jsondata.c_str()); // Copy JSON string to allocated memory
-        // Send pointer to queue
-        if (xQueueSend(mqttQueue, &jsonCopy, pdMS_TO_TICKS(100)) != pdPASS)
-        {
-          Serial.println("Error: Failed to send JSON pointer to MQTT queue");
-          vPortFree(jsonCopy); // Free memory if not sent
-        }
-        else
-        {
-          // Serial.println("JSON sent to queue successfully");
-          // Serial.println(jsonCopy);
-        }
+        Serial.println("Error: Failed to send JSON pointer to MQTT queue");
       }
       else
       {
-        Serial.println("Error: Memory allocation failed");
+        Serial.println("JSON sent to queue successfully");
+        Serial.println(jsondata);
       }
     }
   }
