@@ -386,7 +386,7 @@ void mqttSendTask(void *parameter)
         // Thử gửi dữ liệu qua MQTT
         if (client.publish(fullTopic, data.c_str()))
         {
-          Serial.printf("MQTT sent successfully: %s\n", data.c_str());
+          Serial.printf("MQTT sent successfully\n");
           break; // Thoát vòng lặp retry khi gửi thành công
         }
         else
@@ -531,7 +531,7 @@ void readRs485(byte * buffer)
     Serial2.readBytes(buffer, LOG_SIZE);
     // Kiểm tra checksum
     uint8_t calculatedChecksum = calculateChecksum_LogData(buffer, LOG_SIZE);
-    Serial.print("checkSumcalculatedChecksum = " + String(calculatedChecksum)+"\n");
+    // Serial.print("checkSumcalculatedChecksum = " + String(calculatedChecksum)+"\n");
     PumpLog log;
     log.checksum = buffer[30];
     // Serial.print("CheckSum[30] = " + String(log.checksum)+"\n");
@@ -548,8 +548,8 @@ void readRs485(byte * buffer)
       }
       else
       {
-        Serial.println("JSON sent to queue successfully");
-        Serial.println(jsondata);
+        // Serial.println("JSON sent to queue successfully");
+        // Serial.println(jsondata);
       }
     }
   }
