@@ -76,24 +76,25 @@ struct DeviceGetStatus {
 
 // Cấu trúc dữ liệu log
 struct PumpLog {
-  uint8_t send1;         // Byte 1
-  uint8_t send2;         // Byte 2
-  uint8_t idVoi;         // Byte 3
-  uint16_t viTriLogCot;  // Byte 4-5
-  uint16_t viTriLogData; // Byte 6-7
-  uint16_t maLanBom;     // Byte 8-9
-  uint32_t soLitBom;     // Byte 10-13
-  uint16_t donGia;       // Byte 14-15
-  uint32_t soTotalTong;  // Byte 16-19
-  uint32_t soTienBom;    // Byte 20-23
-  uint8_t ngay;          // Byte 24
-  uint8_t thang;         // Byte 25
-  uint8_t nam;           // Byte 26
-  uint8_t gio;           // Byte 27
-  uint8_t phut;          // Byte 28
-  uint8_t giay;          // Byte 29
+  uint8_t send1;         // Byte 0
+  uint8_t send2;         // Byte 1
+  uint8_t idVoi;         // Byte 2
+  uint16_t viTriLogCot;  // Byte 3-4
+  uint16_t viTriLogData; // Byte 5-6
+  uint16_t maLanBom;     // Byte 7-8
+  uint32_t soLitBom;     // 4 Byte 9-12
+  uint16_t donGia;       // 2 Byte 13-14
+  uint32_t soTotalTong;  // 4 Byte 15-18
+  uint32_t soTienBom;    // 4 Byte 19-22
+  uint8_t ngay;          // Byte 23
+  uint8_t thang;         // Byte 24
+  uint8_t nam;           // Byte 25
+  uint8_t gio;           // Byte 26
+  uint8_t phut;          // Byte 27
+  uint8_t giay;          // Byte 28
+  uint16_t send3;        // Byte 29
   uint8_t checksum;      // Byte 30
-  uint8_t send3;         // Byte 31
+  uint8_t send4;         // Byte 31
 };
 
 struct TimeSetup

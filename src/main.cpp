@@ -88,7 +88,7 @@ void readRs485(uint8_t *);
 void ConnectWifiMqtt(void *parameter);
 eTaskState checkTaskState(TaskHandle_t taskHandle);
 void webServerTask(void *parameter);
-
+void ConnectedKPLBox(void * param);
 
 bool statusConnected = false;
 
@@ -101,6 +101,8 @@ bool isLoggedIn = false;
 void setup()
 {
   Serial.begin(115200);
+  pinMode(OUT1, OUTPUT);
+  pinMode(OUT2, OUTPUT);
   esp_task_wdt_init(60, true);
   esp_task_wdt_add(NULL); // Thêm các nhiệm vụ bạn muốn giám sát, NULL để giám sát tất cả nhiệm vụ
   // Initialize RS485
@@ -113,7 +115,7 @@ void setup()
   client.setCallback(mqttCallback);
 
   // Khởi tạo Queue ban đầu
-  mqttQueue = xQueueCreate(15, LOG_SIZE * sizeof(char));
+  mqttQueue = xQueueCreate(15, sizeof(PumpLog));
   logIdLossQueue = xQueueCreate(100, sizeof(DtaLogLoss));
 
   // Create mutex for flash access
@@ -128,6 +130,12 @@ void setup()
 
   xTaskCreate(webServerTask, "webServerTask", 8192, NULL, 1, NULL);
 
+   // Thông báo KPL ESP32 đã sẵn sàng tiến hành gởi lệnh xuống KPL để đọc dữ liệu
+  sendStartupCommand();
+
+  // xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
+  xTaskCreate(runCommandRs485, "runCommandRs485", 16384, NULL, 2, &Handle_Rs485);
+
   xTaskCreate(ConnectWifiMqtt, "connectWifiMqtt", 8192, NULL, 1, &Handle_Wifi);
   // Cấu hình NTP
   while (statusConnected==false)
@@ -141,7 +149,7 @@ void setup()
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   // In ra thời gian ban đầu
   struct tm timeinfo;
-   if (!getLocalTime(&timeinfo))
+  if (!getLocalTime(&timeinfo))
   {
     Serial.println("Failed to obtain time");
     ESP.restart();
@@ -150,11 +158,11 @@ void setup()
   setUpTime(timeSetup, timeinfo);
   // Đồng bộ thời gian với bên KPL
   processAllVoi(timeSetup); // Xử lý tất cả các ID vòi
-  // Thông báo KPL ESP32 đã sẵn sàng
-  sendStartupCommand();
+  // // Thông báo KPL ESP32 đã sẵn sàng
+  // sendStartupCommand();
 
-  // xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
-  xTaskCreate(runCommandRs485, "runCommandRs485", 16384, NULL, 2, &Handle_Rs485);
+  // // xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
+  // xTaskCreate(runCommandRs485, "runCommandRs485", 16384, NULL, 2, &Handle_Rs485);
   xTaskCreate(mqttSendTask, "mqttSendTask", 8192, NULL, 3, &Handle_MqttSend);
   
 }
@@ -323,7 +331,7 @@ void ConnectWifiMqtt(void *parameter){
       {
         Serial.println("\nWiFi connection failed, retrying...");
         retryConenct++;
-        if (retryCount > 3)
+        if (retryConenct > 20)
           ESP.restart();
         vTaskDelay(pdMS_TO_TICKS(5000)); // Đợi trước khi thử lại
         continue;
@@ -365,6 +373,7 @@ void mqttSendTask(void *parameter)
   TickType_t getTick;
   getTick = xTaskGetTickCount();
   String data = ""; // Dữ liệu lấy từ hàng đợi
+  PumpLog log;
   Serial.println("Started task mqtt send");
   // Biến đếm thời gian
   int elapsedSeconds = 0;
@@ -375,16 +384,25 @@ void mqttSendTask(void *parameter)
   {
     // Serial.print("Vao day nha");
     // Nhận dữ liệu từ hàng đợi
-    if (xQueueReceive(mqttQueue, &data, pdMS_TO_TICKS(500)))
+    if (!client.connected())
     {
+      /* code */
+      Serial.println("Not Connected Internet/ Mqtt");
+
+    }else if (xQueueReceive(mqttQueue, &log, pdMS_TO_TICKS(500)))
+    {
+      String jsondata = convertPumpLogToJson(log);
+      Serial.printf("LogCotBom: %d  -- LogData: %d\n", log.viTriLogCot, log.viTriLogData);
+
       int retryCount = 0;         // Số lần thử lại
       const int maxRetries = 3;  // Giới hạn số lần thử lại
       elapsedSeconds = 0;
       dataReceived = true; // Dữ liệu được gửi lên
       while (retryCount < maxRetries)
       {
+        
         // Thử gửi dữ liệu qua MQTT
-        if (client.publish(fullTopic, data.c_str()))
+        if (client.publish(fullTopic, jsondata.c_str()))
         {
           Serial.printf("MQTT sent successfully\n");
           break; // Thoát vòng lặp retry khi gửi thành công
@@ -509,7 +527,7 @@ void runCommandRs485(void *param)
       readRs485(buffer);
     }
 
-    vTaskDelay(150 / portTICK_PERIOD_MS);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
     // continue;
   }
 }
@@ -536,19 +554,21 @@ void readRs485(byte * buffer)
     log.checksum = buffer[30];
     // Serial.print("CheckSum[30] = " + String(log.checksum)+"\n");
     // Kiểm tra điều kiện log gởi lên có đúng hay ko
-    if (calculatedChecksum == log.checksum)
+    if (calculatedChecksum == log.checksum && buffer[0] == 1 && buffer[1] == 2 && buffer[29] == 3 && buffer[31] == 4)
     {
       // Gán dữ liệu vào struct
       ganLog(buffer, log);
-      String jsondata = convertPumpLogToJson(log);
-      // Serial.println(jsondata);
-      if (xQueueSend(mqttQueue, &jsondata, pdMS_TO_TICKS(300)) != pdPASS)
+      // String jsondata = convertPumpLogToJson(log);
+      // Serial.printf("Len: %d\n", jsondata.length());
+
+      if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(300)) != pdPASS)
       {
         Serial.println("Error: Failed to send JSON pointer to MQTT queue");
       }
       else
       {
         // Serial.println("JSON sent to queue successfully");
+        xTaskCreate(ConnectedKPLBox, "ConnectedKPLBox", 1023, NULL, 3, NULL);
         // Serial.println(jsondata);
       }
     }
@@ -698,4 +718,17 @@ void checkHeap()
     client.publish(topicStatus, json.c_str());
     // checkHeapIntegrity(); // Kiểm tra tính toàn vẹn của heap
   }
+}
+
+// Kích hoạt lại relay để nhấn O-E để thực hiện việc in lại dữ liệu
+void ConnectedKPLBox(void * param) {
+  digitalWrite(OUT1, HIGH); // Bật relay
+  vTaskDelay(200/ portTICK_PERIOD_MS);
+  digitalWrite(OUT2, HIGH); // Bật relay
+  vTaskDelay(200/ portTICK_PERIOD_MS);
+  
+  // không giữ trạng thái của rekay
+  digitalWrite(OUT1, LOW); // Bật relay
+  digitalWrite(OUT2, LOW);
+  vTaskDelete(NULL);
 }
