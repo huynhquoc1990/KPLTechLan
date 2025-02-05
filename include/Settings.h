@@ -51,9 +51,9 @@ const int   daylightOffset_sec = 3600;
 // char* wifi_password = "T@nqu0c1"; // atcsoft12345
 
 // Khai báo SSID và Password mặc định
-char TopicMqtt[32] = "KPL1"; // SSID mặc định
-char wifi_ssid[32] = "KPL_TECH"; // SSID mặc định
-char wifi_password[64] = "999999999";     // Mật khẩu mặc định (rỗng)
+char TopicMqtt[32] = "VT-T03-V10"; // SSID mặc định
+char wifi_ssid[32] = "Van Truc 6"; // SSID mặc định
+char wifi_password[64] = "vt123456@";     // Mật khẩu mặc định (rỗng)
 
 const char* TopicLogError = "/Error/";
 const char* TopicRestart  = "/Restart/";
