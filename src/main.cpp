@@ -218,11 +218,11 @@ eTaskState checkTaskState(TaskHandle_t taskHandle){
 
 // Task chạy webserver
 void webServerTask(void *parameter) {
-    if (!LittleFS.begin()) {
-        Serial.println("Không thể khởi tạo LittleFS");
-        vTaskDelete(NULL); // Xóa task nếu không khởi tạo được LittleFS
-        return;
-    }
+    // if (!LittleFS.begin()) {
+    //     Serial.println("Không thể khởi tạo LittleFS");
+    //     vTaskDelete(NULL); // Xóa task nếu không khởi tạo được LittleFS
+    //     return;
+    // }
 
     // Đọc dữ liệu cấu hình
     
