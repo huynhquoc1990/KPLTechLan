@@ -129,11 +129,11 @@ void setup()
   Serial.println("Setup finished");
 
   xTaskCreate(webServerTask, "webServerTask", 8192, NULL, 1, NULL);
-  delay(10000);
+  delay(3000);
 
    // Thông báo KPL ESP32 đã sẵn sàng tiến hành gởi lệnh xuống KPL để đọc dữ liệu
   sendStartupCommand();
-  delay(10000);
+  delay(3000);
    // Thông báo KPL ESP32 đã sẵn sàng tiến hành gởi lệnh xuống KPL để đọc dữ liệu
   sendStartupCommand();
 
