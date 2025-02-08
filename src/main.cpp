@@ -25,7 +25,7 @@
 #include <TTL.h>
 #include <WebServer.h>
 #include "Webservice.h"
-
+#include <ESPAsyncWebServer.h>
 // Khởi tạo client
 
 // Cấu hình Ethernet
@@ -89,13 +89,21 @@ void ConnectWifiMqtt(void *parameter);
 eTaskState checkTaskState(TaskHandle_t taskHandle);
 void webServerTask(void *parameter);
 void ConnectedKPLBox(void * param);
+// Bổ xung hàm scanwwifi và kết nối wifi theo kiểu bất đồng bộ
+void scanWiFi();
+void connectWiFi(AsyncWebServerRequest *request);
 
 bool statusConnected = false;
 
 // Khởi tạo WebServer
-WebServer server(80);
+// WebServer server(80);
+// Khoi tạo webserver bất đồng bộ
+AsyncWebServer server(80);
 // Biến để kiểm tra trạng thái đăng nhập
 bool isLoggedIn = false;
+
+const char *apSSID = "KPL-Qa-Gas-Device";
+String wifiList = "";
 
 /// @brief Hàm setup thiết lập các thông tin ban đầu
 void setup()
@@ -128,7 +136,7 @@ void setup()
   Serial.printf("Log read successfully for ID: %u\n", currentId);
   Serial.println("Setup finished");
 
-  xTaskCreate(webServerTask, "webServerTask", 8192, NULL, 1, NULL);
+  xTaskCreate(webServerTask, "webServerTask", 16384, NULL, 1, NULL);
   delay(3000);
 
    // Thông báo KPL ESP32 đã sẵn sàng tiến hành gởi lệnh xuống KPL để đọc dữ liệu
@@ -216,37 +224,179 @@ eTaskState checkTaskState(TaskHandle_t taskHandle){
   return state;
 }
 
-// Task chạy webserver
-void webServerTask(void *parameter) {
-    // if (!LittleFS.begin()) {
-    //     Serial.println("Không thể khởi tạo LittleFS");
-    //     vTaskDelete(NULL); // Xóa task nếu không khởi tạo được LittleFS
-    //     return;
-    // }
-
-    // Đọc dữ liệu cấu hình
-    
-    WiFi.softAP("KPL-Qa-Gas-Device", "Qu0c@nh1");
-    // Serial.println("Wi-Fi AP đã được kích hoạt. SSID: ESP32_Config, Mật khẩu: 12345678");
-
-    // Cài đặt các route cho web server
-    server.on("/", [](){handleRoot(&server, isLoggedIn);});
-    server.on("/login", HTTP_POST, []() {handleLogin(&server, isLoggedIn);});
-    server.on("/logout", [](){handleLogout(&server, isLoggedIn);});
-    // Định nghĩa route với lambda
-    server.on("/save", HTTP_POST, []() {
-      handleSave(&server, isLoggedIn);
-    });
-    server.begin();
-    Serial.println("Web server đã sẵn sàng!");
-
-    // Vòng lặp để xử lý yêu cầu web
-    while (true) {
-        server.handleClient();
-        vTaskDelay(100/ portTICK_PERIOD_MS); // Để tránh CPU bị quá tải
-        esp_task_wdt_reset();
-    }
+// Hàm quét WiFi và trả về HTML
+// Quét danh sách WiFi
+void scanWiFi() {
+  int networks = WiFi.scanNetworks();
+  wifiList = "[";
+  for (int i = 0; i < networks; i++) {
+      if (i > 0) wifiList += ",";
+      wifiList += "\"" + WiFi.SSID(i) + "\"";
+  }
+  wifiList += "]";
+  WiFi.scanDelete();  // Giải phóng bộ nhớ sau khi quét
 }
+
+
+// Xử lý khi người dùng gửi yêu cầu kết nối WiFi
+void connectWiFi(AsyncWebServerRequest *request) {
+  if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
+      String ssid = request->getParam("ssid", true)->value();
+      String password = request->getParam("password", true)->value();
+
+      request->send(200, "text/html", "<h3>Đang kết nối tới " + ssid + "...</h3> <a href='/'>Quay lại</a>");
+      
+      Serial.println("Kết nối tới WiFi: " + ssid);
+      WiFi.begin(ssid.c_str(), password.c_str());
+
+      int timeout = 15; // 15 giây timeout
+      while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+          delay(1000);
+          Serial.print(".");
+          timeout--;
+      }
+
+      if (WiFi.status() == WL_CONNECTED) {
+          Serial.println("\nKết nối thành công! IP: " + WiFi.localIP().toString());
+      } else {
+          Serial.println("\nKết nối thất bại!");
+      }
+  } else {
+      request->send(400, "text/plain", "Thiếu SSID hoặc mật khẩu!");
+  }
+}
+
+// Hàm kiểm tra kết nối internet bằng cách ping đến DNS Google
+bool isConnectedToInternet() {
+  return ethClient.connect("8.8.8.8", 53);  // Kiểm tra kết nối đến Google DNS
+}
+
+// Xử lý route "/check"
+void handleCheckWiFi(AsyncWebServerRequest *request) {
+  if (isConnectedToInternet()) {
+      request->send(200, "text/html", checkInternet);
+  } else {
+    request->send(200, "text/html", checkInternetNoConnect);
+    vTaskDelay(2000/ portTICK_PERIOD_MS);
+    request->redirect("/config");
+  }
+}
+
+
+// Task chạy webserver
+// Thực hiện theo phương thức bất đồng bộ
+void webServerTask(void *parameter) {
+
+  WiFi.softAP(apSSID, "Qu0c@nh1");
+  Serial.println("WiFi AP Started: " + String(apSSID));
+
+  scanWiFi();
+
+  // Cấu hình Web Server
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+      if (!isLoggedIn) {
+          request->redirect("/login");
+      } else {
+          request->redirect("/config");
+      }
+  });
+
+  // Vao trang Login
+  server.on("/login", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->send(200, "text/html", loginPage);
+  });
+
+  server.on("/login", HTTP_POST, [](AsyncWebServerRequest *request) {
+      if (request->hasParam("username", true) && request->hasParam("password", true)) {
+          String username = request->getParam("username", true)->value();
+          String password = request->getParam("password", true)->value();
+
+          if (username == adminUser && password == adminPass) {
+              isLoggedIn = true;
+              request->redirect("/config");
+          } else {
+              request->send(200, "text/html", loginFail);
+          }
+      }
+  });
+
+  server.on("/logout", HTTP_GET, [](AsyncWebServerRequest *request) {
+      isLoggedIn = false;
+      request->redirect("/login");
+  });
+
+  server.on("/check", HTTP_GET, handleCheckWiFi);  // Route kiểm tra trạng thái Wi-Fi
+
+  server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request) {
+      if (!isLoggedIn) {
+          request->redirect("/login");
+      } else {
+          request->send(200, "text/html", configPage1);
+      }
+  });
+
+  server.on("/wifi_scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->send(200, "application/json", wifiList);
+  });
+
+  // Xử lý lưu WiFi (có thể bổ sung)
+  server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
+      if (!isLoggedIn) {
+          request->redirect("/login");
+          return;
+      }
+      if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
+          String ssid = request->getParam("ssid", true)->value();
+          String password = request->getParam("password", true)->value();
+          String id = request->getParam("id", true)->value();
+          Serial.println("WiFi lưu: " + ssid + " - " + password + " - " + id);
+          String data = ssid + "\n" + password + "\n" + id;
+          writeFileConfig("/config.txt", data);
+          request->send(200, "text/html", result);
+          delay(2000);
+          ESP.restart();
+      }else {
+          request->send(200, "text/html", serverFail);
+        }
+  });
+
+  server.begin();
+  Serial.println("Web server đã sẵn sàng!");
+
+  vTaskDelete(NULL);
+}
+
+// Phương thức củ
+// void webServerTask(void *parameter) {
+//     // if (!LittleFS.begin()) {
+//     //     Serial.println("Không thể khởi tạo LittleFS");
+//     //     vTaskDelete(NULL); // Xóa task nếu không khởi tạo được LittleFS
+//     //     return;
+//     // }
+
+//     // Đọc dữ liệu cấu hình
+    
+//     WiFi.softAP("KPL-Qa-Gas-Device", "Qu0c@nh1");
+//     // Serial.println("Wi-Fi AP đã được kích hoạt. SSID: ESP32_Config, Mật khẩu: 12345678");
+
+//     // Cài đặt các route cho web server
+//     server.on("/", [](){handleRoot(&server, isLoggedIn);});
+//     server.on("/login", HTTP_POST, []() {handleLogin(&server, isLoggedIn);});
+//     server.on("/logout", [](){handleLogout(&server, isLoggedIn);});
+//     // Định nghĩa route với lambda
+//     server.on("/save", HTTP_POST, []() {
+//       handleSave(&server, isLoggedIn);
+//     });
+//     server.begin();
+//     Serial.println("Web server đã sẵn sàng!");
+
+//     // Vòng lặp để xử lý yêu cầu web
+//     while (true) {
+//         server.handleClient();
+//         vTaskDelay(100/ portTICK_PERIOD_MS); // Để tránh CPU bị quá tải
+//         esp_task_wdt_reset();
+//     }
+// }
 
 /// @brief hàm kết nối Wifi và Mqtt
 /// @param parameter
