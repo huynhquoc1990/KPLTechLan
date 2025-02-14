@@ -366,38 +366,6 @@ void webServerTask(void *parameter) {
   vTaskDelete(NULL);
 }
 
-// Phương thức củ
-// void webServerTask(void *parameter) {
-//     // if (!LittleFS.begin()) {
-//     //     Serial.println("Không thể khởi tạo LittleFS");
-//     //     vTaskDelete(NULL); // Xóa task nếu không khởi tạo được LittleFS
-//     //     return;
-//     // }
-
-//     // Đọc dữ liệu cấu hình
-    
-//     WiFi.softAP("KPL-Qa-Gas-Device", "Qu0c@nh1");
-//     // Serial.println("Wi-Fi AP đã được kích hoạt. SSID: ESP32_Config, Mật khẩu: 12345678");
-
-//     // Cài đặt các route cho web server
-//     server.on("/", [](){handleRoot(&server, isLoggedIn);});
-//     server.on("/login", HTTP_POST, []() {handleLogin(&server, isLoggedIn);});
-//     server.on("/logout", [](){handleLogout(&server, isLoggedIn);});
-//     // Định nghĩa route với lambda
-//     server.on("/save", HTTP_POST, []() {
-//       handleSave(&server, isLoggedIn);
-//     });
-//     server.begin();
-//     Serial.println("Web server đã sẵn sàng!");
-
-//     // Vòng lặp để xử lý yêu cầu web
-//     while (true) {
-//         server.handleClient();
-//         vTaskDelay(100/ portTICK_PERIOD_MS); // Để tránh CPU bị quá tải
-//         esp_task_wdt_reset();
-//     }
-// }
-
 /// @brief hàm kết nối Wifi và Mqtt
 /// @param parameter
 void ConnectWifiMqtt(void *parameter){
