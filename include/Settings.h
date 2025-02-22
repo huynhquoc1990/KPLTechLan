@@ -19,7 +19,7 @@ const char* adminPass = "Qu0c@nh1";
 
 // Thông tin hệ thống mqtt
 
-const char* mqttServer =    "103.57.221.161"; // "tongmcbd.vlxdbdphongit.com"; 103.57.221.161
+const char* mqttServer =    "103.57.221.161"; // 
 const int   mqttPort =        1883;                  
 const char* mqttUser =      "qhu";
 const char* mqttPassword =  "T@nqu0c1";
@@ -51,9 +51,9 @@ const int   daylightOffset_sec = 3600;
 // char* wifi_password = "T@nqu0c1"; // atcsoft12345
 
 // Khai báo SSID và Password mặc định
-char TopicMqtt[32] = "VT-T03-V10"; // SSID mặc định
-char wifi_ssid[32] = "Van Truc 6"; // SSID mặc định
-char wifi_password[64] = "vt123456@";     // Mật khẩu mặc định (rỗng)
+char TopicMqtt[32] = "QA-T01-V01"; // SSID mặc định
+char wifi_ssid[32] = "Quoc Thu"; // SSID mặc định
+char wifi_password[64] = "T@nqu0c1";     // Mật khẩu mặc định (rỗng)
 
 const char* TopicLogError = "/Error/";
 const char* TopicRestart  = "/Restart/";

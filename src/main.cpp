@@ -522,7 +522,6 @@ void mqttSendTask(void *parameter)
       dataReceived = true; // Dữ liệu được gửi lên
       while (retryCount < maxRetries)
       {
-        
         // Thử gửi dữ liệu qua MQTT
         if (client.publish(fullTopic, jsondata.c_str()))
         {
@@ -535,6 +534,7 @@ void mqttSendTask(void *parameter)
           retryCount++;
           vTaskDelay(500 / portTICK_PERIOD_MS); // Đợi trước khi thử lại
         }
+        vTaskDelay(100/portTICK_PERIOD_MS);
       }
 
       // Nếu vượt quá số lần thử lại, xử lý lỗi
