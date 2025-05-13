@@ -1,14 +1,14 @@
 #ifndef SETTINGS_H
 #define SETTINGS_H
 // Thông số của RS485
-#define RX_PIN              13//16 // 35 34
-#define TX_PIN              5 //17 //32 13
+#define RX_PIN              13//16-ASR // 35 34  13
+#define TX_PIN              5 //17-ASR //32 13   5
 #define ITEM_SIZE_RS485     125
 #define RS485BaudRate       9600
 #define WIFI_TIMEOUT_MS     20000
-#define OUT1                15
-#define OUT2                2
-#define INPUT1              36
+#define OUT1                15    // 15 bo A2
+#define OUT2                2     // 2  bo A2   , 18 Còi của bo ASR
+#define INPUT1              36      
 #define FLASH_DATA_FILE "/log.bin" // File lưu dữ liệu log
 // File lưu thông tin trên LittleFS
 const char* configFile = "/config.txt";

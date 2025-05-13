@@ -164,7 +164,7 @@ void setup()
   if (!getLocalTime(&timeinfo))
   {
     Serial.println("Failed to obtain time");
-    ESP.restart();
+    // ESP.restart();
   } 
   Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
   setUpTime(timeSetup, timeinfo);
@@ -534,7 +534,7 @@ void mqttSendTask(void *parameter)
           retryCount++;
           vTaskDelay(500 / portTICK_PERIOD_MS); // Đợi trước khi thử lại
         }
-        vTaskDelay(100/portTICK_PERIOD_MS);
+        
       }
 
       // Nếu vượt quá số lần thử lại, xử lý lỗi
@@ -542,6 +542,7 @@ void mqttSendTask(void *parameter)
       {
         Serial.println("Error: MQTT send failed after maximum retries. Discarding data.");
       }
+      vTaskDelay(100/portTICK_PERIOD_MS);
     }else {
         // Không có dữ liệu, tăng thời gian đếm
         elapsedSeconds += 1; // Tăng 1 giây cho mỗi chu kỳ
@@ -838,12 +839,19 @@ void checkHeap()
     String json;
     serializeJson(doc, json);
     client.publish(topicStatus, json.c_str());
+    // áp dụng cho board ASR
+    tone(OUT2,300,100);
     // checkHeapIntegrity(); // Kiểm tra tính toàn vẹn của heap
   }
 }
 
 // Kích hoạt lại relay để nhấn O-E để thực hiện việc in lại dữ liệu
 void ConnectedKPLBox(void * param) {
+  // ĐOạn chương trình áp dụng cho ASR
+  // tone(OUT2,1245,100);
+  // vTaskDelay(200/ portTICK_PERIOD_MS);
+
+  // ĐOạn chương trình áp dụng cho bản A2
   digitalWrite(OUT1, HIGH); // Bật relay
   vTaskDelay(200/ portTICK_PERIOD_MS);
   digitalWrite(OUT2, HIGH); // Bật relay
