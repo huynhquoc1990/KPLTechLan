@@ -105,6 +105,43 @@ bool isLoggedIn = false;
 const char *apSSID = "KPL-Qa-Gas-Device";
 String wifiList = "";
 
+void setupTime()
+{
+  // Cấu hình thời gian
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  struct tm timeinfo;
+  int retry = 0;
+  const int maxRetries = 5;
+
+  // Thử lấy thời gian, nếu thất bại thì gọi lại configTime và thử lại
+  while (!getLocalTime(&timeinfo) && retry < maxRetries)
+  {
+    Serial.println("Failed to obtain time. Retrying...");
+    delay(2000); // Chờ 2 giây
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    retry++;
+  }
+
+  
+
+  if (retry == maxRetries)
+  {
+    Serial.println("Failed to obtain time after multiple retries");
+    // Nếu muốn khởi động lại thì bỏ comment dòng sau:
+    ESP.restart();
+  }
+  else
+  {
+    setUpTime(timeSetup, timeinfo);
+    // Đồng bộ thời gian với bên KPL
+    processAllVoi(timeSetup); // Xử lý tất cả các ID vòi
+    Serial.println("Time acquired successfully:");
+    Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+  }
+}
+
+
 /// @brief Hàm setup thiết lập các thông tin ban đầu
 void setup()
 {
@@ -156,20 +193,22 @@ void setup()
     esp_task_wdt_reset();
     Serial.print(".");
   }
-  Serial.println("");
+  Serial.println("Thiet lap thoi gian:");
+
+  setupTime();
   
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-  // In ra thời gian ban đầu
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo))
-  {
-    Serial.println("Failed to obtain time");
-    // ESP.restart();
-  } 
-  Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
-  setUpTime(timeSetup, timeinfo);
-  // Đồng bộ thời gian với bên KPL
-  processAllVoi(timeSetup); // Xử lý tất cả các ID vòi
+  // configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  // // In ra thời gian ban đầu
+  // struct tm timeinfo;
+  // if (!getLocalTime(&timeinfo))
+  // {
+  //   Serial.println("Failed to obtain time");
+  //   // ESP.restart();
+  // } 
+  // Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+  // setUpTime(timeSetup, timeinfo);
+  // // Đồng bộ thời gian với bên KPL
+  // processAllVoi(timeSetup); // Xử lý tất cả các ID vòi
   // // Thông báo KPL ESP32 đã sẵn sàng
   // sendStartupCommand();
 

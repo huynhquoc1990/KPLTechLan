@@ -25,7 +25,7 @@ const char* mqttUser =      "qhu";
 const char* mqttPassword =  "T@nqu0c1";
 
 // Định nghĩa máy chủ NTP
-const char* ntpServer = "pool.ntp.org";
+const char* ntpServer = "time.google.com";
 const long  gmtOffset_sec = 3600 * 7;  // Múi giờ GMT+7
 const int   daylightOffset_sec = 0;
 
