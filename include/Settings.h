@@ -1,8 +1,8 @@
 #ifndef SETTINGS_H
 #define SETTINGS_H
 // Thông số của RS485
-#define RX_PIN              13//16-ASR // 35 34  13
-#define TX_PIN              5 //17-ASR //32 13   5
+#define RX_PIN              13//16-ASR // 35 34  13./ bo ISOlated: 16 / bo KC868: 13
+#define TX_PIN              5 //17-ASR //32 13   5. / bo ISOlated: 17 / bo KC868: 5
 #define ITEM_SIZE_RS485     125
 #define RS485BaudRate       9600
 #define WIFI_TIMEOUT_MS     20000
@@ -27,7 +27,7 @@ const char* mqttPassword =  "T@nqu0c1";
 // Định nghĩa máy chủ NTP
 const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 3600 * 7;  // Múi giờ GMT+7
-const int   daylightOffset_sec = 3600;
+const int   daylightOffset_sec = 0;
 
 
 // Cấu hình của Ethernet Lan Ethernet (LAN8720) I/O define:
