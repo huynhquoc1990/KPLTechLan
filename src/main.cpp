@@ -541,8 +541,10 @@ void mqttSendTask(void *parameter)
   const int interval = 300; // 300 giây = 5 phút
     // Biến đánh dấu dữ liệu được gửi lên
   bool dataReceived = false;
+  // esp_task_wdt_add(NULL); // Thêm task hiện tại vào giám sát watchdog
   while (true)
   {
+
     // Serial.print("Vao day nha");
     // Nhận dữ liệu từ hàng đợi
     if (!client.connected())
@@ -603,6 +605,7 @@ void mqttSendTask(void *parameter)
 
     // Chờ trước khi tiếp tục vòng lặp
     vTaskDelayUntil(&getTick, 100 / portTICK_PERIOD_MS);
+    yield(); // Cho phép các tác vụ khác chạy
   }
 }
 
@@ -662,35 +665,67 @@ void runCommandRs485(void *param)
   getTick = xTaskGetTickCount();
   byte buffer[LOG_SIZE];
   unsigned long count = 0;
-  while (true)
+  unsigned long lastSendTime = 0; // Biến lưu thời gian gửi lệnh cuối cùng
+  esp_task_wdt_add(NULL); // Thêm task hiện tại vào giám sát watchdog
+  while (1)
   {
-    count++;
-    esp_task_wdt_reset();
-    if (count % 2 == 0)
+    /* code */
+    esp_task_wdt_reset(); // Reset watchdog
+    // Đọc RS485 mỗi 10ms
+    readRs485(buffer);
+
+    if (millis() - lastSendTime >= 2000)
     {
-      QueueHandle_t b = logIdLossQueue;
-      if (uxQueueMessagesWaiting(b) > 0)
+      lastSendTime = millis(); // Cập nhật thời gian gửi lệnh cuối cùng
+
+      // Kiểm tra hàng đợi có log cần gửi không
+      if (uxQueueMessagesWaiting(logIdLossQueue) > 0)
       {
         Serial.print("NumLogsLoss: ");
-        Serial.println(uxQueueMessagesWaiting(b));
+        Serial.println(uxQueueMessagesWaiting(logIdLossQueue));
+
         DtaLogLoss dataLogId;
         if (xQueueReceive(logIdLossQueue, &dataLogId, 0))
         {
           Serial.printf("Da goi lenh xuong KPL: %d\n", dataLogId.Logid);
           sendLogRequest(dataLogId.Logid);
-          vTaskDelay(100/ portTICK_PERIOD_MS);
-          readRs485(buffer);
         }
       }
     }
-    else
-    {
-      // Serial.println("Vao doc RS485");
-      readRs485(buffer);
-    }
 
-    vTaskDelay(50 / portTICK_PERIOD_MS);
-    // continue;
+    // Delay 10ms cho vòng lặp
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+    yield(); // Cho phép các tác vụ khác chạy
+  
+  // while (true)
+  // {
+  //   count++;
+  //   esp_task_wdt_reset();
+  //   if (count % 2 == 0)
+  //   {
+  //     QueueHandle_t b = logIdLossQueue;
+  //     if (uxQueueMessagesWaiting(b) > 0)
+  //     {
+  //       Serial.print("NumLogsLoss: ");
+  //       Serial.println(uxQueueMessagesWaiting(b));
+  //       DtaLogLoss dataLogId;
+  //       if (xQueueReceive(logIdLossQueue, &dataLogId, 0))
+  //       {
+  //         Serial.printf("Da goi lenh xuong KPL: %d\n", dataLogId.Logid);
+  //         sendLogRequest(dataLogId.Logid);
+  //         vTaskDelay(100/ portTICK_PERIOD_MS);
+  //         readRs485(buffer);
+  //       }
+  //     }
+  //   }
+  //   else
+  //   {
+  //     // Serial.println("Vao doc RS485");
+  //     readRs485(buffer);
+  //   }
+
+  //   vTaskDelay(50 / portTICK_PERIOD_MS);
+  //   // continue;
   }
 }
 
@@ -735,51 +770,9 @@ void readRs485(byte * buffer)
       }
     }
   }
+  // yield(); // Cho phép các tác vụ khác chạy
 }
 
-
-
-/// @brief Task dùng để kiểm tra việc kết nối internet
-/// @param pvParameters
-// void ethernetTask(void *pvParameters)
-// {
-//   while (true)
-//   {
-//     checkInternetConnection();
-//     if (ETH.linkUp() && ethConnected && !ethPreviouslyConnected)
-//     {
-//       getInfoConnectMqtt();
-//       ethPreviouslyConnected = true; // Cập nhật trạng thái đã kết nối
-//       Serial.println("Ethernet connected on interneted");
-
-//       Serial.println("Connecting to MQTT...");
-//       if (client.connect(TopicMqtt, mqttUser, mqttPassword))
-//       {
-//         Serial.println("MQTT connected");
-//         client.subscribe(topicError);
-//         client.subscribe(topicRestart);
-//         client.subscribe(topicGetLogIdLoss);
-//         client.subscribe(topicChange);
-//         client.subscribe(topicShift);
-//         vTaskDelay(pdMS_TO_TICKS(1000)); // Đợi trước khi thử lại
-//       }
-//       else
-//       {
-//         Serial.println("MQTT connection failed, retrying...");
-//         vTaskDelay(pdMS_TO_TICKS(5000)); // Đợi trước khi thử lại
-//       }
-//       // vTaskSuspend(wifiTaskHandle);  // Tạm dừng task WiFi khi Ethernet đã kết nối
-//     }
-//     else if (!ETH.linkUp() && ethPreviouslyConnected)
-//     {
-//       client.disconnect();
-//       ethPreviouslyConnected = false; // Cập nhật trạng thái mất kết nối
-//       Serial.println("Ethernet disconnected.");
-//       // vTaskResume(wifiTaskHandle);  // Kích hoạt task WiFi khi Ethernet bị ngắt
-//     }
-//     vTaskDelay(10000 / portTICK_PERIOD_MS); // Chờ 1 giây
-//   }
-// }
 /// @brief
 void getInfoConnectMqtt()
 { 
@@ -825,33 +818,15 @@ void getInfoConnectMqtt()
 // Hàm xử lý tất cả các vòi
 void processAllVoi(TimeSetup *time)
 {
-  for (int i = 0; i < numOfVoi; i++)
-  {
-    uint8_t idVoi = idVoiList[i];
-    sendSetTimeCommand(idVoi, time); // Gửi lệnh cho ID vòi
-    vTaskDelay(100/ portTICK_PERIOD_MS);                      // Chờ phản hồi từ thiết bị
-    readResponse(idVoi);             // Đọc phản hồi
-    vTaskDelay(100/ portTICK_PERIOD_MS);                      // Chờ phản hồi từ thiết bị
-  }
+  // for (int i = 0; i < numOfVoi; i++)
+  // {
+  //   uint8_t idVoi = idVoiList[i];
+    sendSetTimeCommand(time); // Gửi lệnh cho ID vòi
+    // vTaskDelay(100/ portTICK_PERIOD_MS);                      // Chờ phản hồi từ thiết bị
+    // readResponse();             // Đọc phản hồi
+    // vTaskDelay(100/ portTICK_PERIOD_MS);                      // Chờ phản hồi từ thiết bị
+  // }
 }
-/// @brief Check kết nối internet
-// void checkInternetConnection()
-// {
-//   IPAddress ip(103, 57, 221, 161); // Google DNS
-//   int pingResult = Ping.ping(ip);
-//   // Serial.print("Ping: "); Serial.println(pingResult);
-//   if (pingResult > 0)
-//   {
-//     // Serial.println("Ping successful - Internet is connected");
-//     ethConnected = true;
-//   }
-//   else
-//   {
-//     // Serial.println("Ping failed - No Internet connection");
-//     ethConnected = false;
-//   }
-// }
-
 void checkHeap()
 {
   if (millis() - timer > 10000)
