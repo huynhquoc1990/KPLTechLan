@@ -12,7 +12,7 @@ struct GetIdLogLoss
 {
   char Idvoi[20];
   char Today[12];
-  char Request_Code[6];
+  char Request_Code[12];
   char CompanyId[20];
 };
 

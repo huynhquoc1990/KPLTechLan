@@ -90,14 +90,21 @@ void getLogData(String command, char *&param)
   byte index = 0;
 
   vTaskDelay(150 / portTICK_PERIOD_MS); // Thêm độ trễ ngắn trước khi đọc phản hồidf mặc định là 200
-  while (Serial2.available() > 0)
+  // Giới hạn index để tránh buffer overflow
+  while (Serial2.available() > 0 && index < (LOG_SIZE - 1))
   {
     char currentChar = Serial2.read();
     tempdata[index++] = currentChar;
   }
-  tempdata[index++] = '\0';
+  tempdata[index] = '\0'; // Không tăng index thêm
 
   // Serial.println(tempdata);
+  
+  // Giải phóng param cũ nếu có
+  if (param != NULL) {
+    vPortFree(param);
+    param = NULL;
+  }
 
   param = (char *)pvPortMalloc((index + 1) * sizeof(char)); // Cấp phát vùng nhớ mới đủ chứa dữ liệu
   if (param != NULL)
@@ -108,6 +115,9 @@ void getLogData(String command, char *&param)
   else
   {
     Serial.println("Error: Failed to allocate memory for param");
+    // Giải phóng tempdata trước khi return
+    vPortFree(tempdata);
+    return;
   }
 
   // Giải phóng tempdata sau khi sao chép
@@ -168,7 +178,7 @@ void sendSetTimeCommand(TimeSetup *time) {
     uint8_t nam = time->nam;   // Năm
     uint8_t gio = time->gio;    // Giờ
     uint8_t phut = time->phut;  // Phút
-    uint8_t giay = time->ngay;  // Giây
+    uint8_t giay = time->giay;  // Giây - Đã sửa lỗi
     uint8_t checksum;
 
     // Xây dựng lệnh

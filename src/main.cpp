@@ -1,11 +1,10 @@
+#include <Arduino.h>
 #include <Wire.h>
 // #include <ETH.h>
-#include <Arduino.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
-#include <Wire.h>
 #include "Settings.h"
 #include <esp_task_wdt.h>
 #include <EEPROM.h>
@@ -102,7 +101,7 @@ AsyncWebServer server(80);
 // Biến để kiểm tra trạng thái đăng nhập
 bool isLoggedIn = false;
 
-const char *apSSID = "KPL-Qa-Gas-Device";
+const char *apSSID = AP_SSID;
 String wifiList = "";
 
 void setupTime()
@@ -326,7 +325,7 @@ void handleCheckWiFi(AsyncWebServerRequest *request) {
 // Thực hiện theo phương thức bất đồng bộ
 void webServerTask(void *parameter) {
 
-  WiFi.softAP(apSSID, "Qu0c@nh1");
+  WiFi.softAP(apSSID, AP_PASSWORD);
   Serial.println("WiFi AP Started: " + String(apSSID));
 
   scanWiFi();
@@ -493,7 +492,13 @@ void ConnectWifiMqtt(void *parameter){
         Serial.println("\nWiFi connection failed, retrying...");
         retryConenct++;
         if (retryConenct > 20)
+        {
+          Serial.println("Max WiFi retry reached. Restarting...");
+          // Lưu log trước khi restart
+          strcpy(deviceStatus->status, "WiFi connection failed - Restarting");
+          vTaskDelay(pdMS_TO_TICKS(1000));
           ESP.restart();
+        }
         vTaskDelay(pdMS_TO_TICKS(5000)); // Đợi trước khi thử lại
         continue;
       }
@@ -764,8 +769,13 @@ void readRs485(byte * buffer)
       }
       else
       {
-        // Serial.println("JSON sent to queue successfully");
-        xTaskCreate(ConnectedKPLBox, "ConnectedKPLBox", 1023, NULL, 3, NULL);
+        Serial.println("JSON sent to queue successfully");
+        // Su dung board den IO thì ko bật cái xtasklen, còn lại thì bật lên
+        // Kiểm tra kết quả tạo task
+        if (xTaskCreate(ConnectedKPLBox, "ConnectedKPLBox", 1024, NULL, 3, NULL) != pdPASS)
+        {
+          Serial.println("Error: Failed to create ConnectedKPLBox task");
+        }
         // Serial.println(jsondata);
       }
     }

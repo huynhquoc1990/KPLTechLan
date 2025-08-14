@@ -7,6 +7,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <freertos/queue.h>
+#include "Credentials.h"
 
 /// @brief Hàm lấy thông tin từ server và kiểm tra nội dung có thay đổi trong flash hay không? Nếu có lưu mới
 /// @param settings
@@ -20,7 +21,7 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex)
   if (WiFi.status() == WL_CONNECTED)
   {
     HTTPClient http;
-    String url = "http://103.57.221.161:5002/companys-managerment/getMqttServer";
+    String url = String(API_BASE_URL) + API_SETTINGS_ENDPOINT;
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
 
@@ -114,7 +115,7 @@ void callAPIServerGetCompanyInfo(void *param)
   if (WiFi.status() == WL_CONNECTED)
   {
     HTTPClient http;
-    String url = "http://103.57.221.161:5002/device-managerment/devices/infoid";
+    String url = String(API_BASE_URL) + API_COMPANY_ENDPOINT;
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
 
@@ -199,7 +200,7 @@ void callAPIServerGetLogLoss(void *param){
   {
     HTTPClient http;
     // Your API endpoint
-    String url = "http://103.57.221.161:5002/get-managerment/giaodich/Idloss";
+    String url = String(API_BASE_URL) + API_LOG_LOSS_ENDPOINT;
     http.begin(url);
     // Headers
     http.addHeader("Content-Type", "application/json");

@@ -1,5 +1,8 @@
 #ifndef SETTINGS_H
 #define SETTINGS_H
+
+// Include credentials từ file riêng
+#include "Credentials.h"
 // Thông số của RS485
 #define RX_PIN              35//16-ASR // 35 34  13./ bo ISOlated màu đen: 17 / bo KC868: 13
 #define TX_PIN              32 //17-ASR //32 13   5. / bo ISOlated màu đen: 16 / bo KC868: 5
@@ -13,16 +16,16 @@
 // File lưu thông tin trên LittleFS
 const char* configFile = "/config.txt";
 // Định nghĩa tên đăng nhập và mật khẩu cho trang cấu hình
-const char* adminUser = "admin";
-const char* adminPass = "Qu0c@nh1";
+const char* adminUser = ADMIN_USERNAME;
+const char* adminPass = ADMIN_PASSWORD;
 
 
 // Thông tin hệ thống mqtt
 
-const char* mqttServer =    "103.57.221.161"; // 
+const char* mqttServer =    "103.57.221.161"; // Server mặc định, sẽ được cập nhật từ API
 const int   mqttPort =        1883;                  
-const char* mqttUser =      "qhu";
-const char* mqttPassword =  "T@nqu0c1";
+const char* mqttUser =      MQTT_USERNAME;
+const char* mqttPassword =  MQTT_PASSWORD;
 
 // Định nghĩa máy chủ NTP
 const char* ntpServer = "time.google.com";
