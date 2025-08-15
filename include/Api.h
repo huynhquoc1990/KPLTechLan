@@ -26,7 +26,7 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex)
     http.addHeader("Content-Type", "application/json");
 
     // Prepare JSON data to send
-    JsonDocument doc;
+    DynamicJsonDocument doc(1024); // Adjust size based on expected response
     doc["IdDevice"] = TopicMqtt;
 
     String json;
@@ -38,7 +38,7 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex)
     if (httpResponseCode > 0 && httpResponseCode == 200)
     {
       String response = http.getString();
-      JsonDocument doc; // Adjust size based on expected response
+      DynamicJsonDocument doc(1024); // Adjust size based on expected response
       DeserializationError error = deserializeJson(doc, response);
 
       if (!error)
@@ -120,7 +120,7 @@ void callAPIServerGetCompanyInfo(void *param)
     http.addHeader("Content-Type", "application/json");
 
     // Prepare JSON data to send
-    JsonDocument doc;
+    DynamicJsonDocument doc(1024);
     doc["IdDevice"] = TopicMqtt;
 
     String json;
@@ -132,7 +132,7 @@ void callAPIServerGetCompanyInfo(void *param)
     if (httpResponseCode > 0 && httpResponseCode == 200)
     {
       String response = http.getString();
-      JsonDocument doc; // Adjust size based on expected response
+      DynamicJsonDocument doc(1024); // Adjust size based on expected response
       DeserializationError error = deserializeJson(doc, response);
 
       if (!error)
@@ -204,8 +204,12 @@ void callAPIServerGetLogLoss(void *param){
     http.begin(url);
     // Headers
     http.addHeader("Content-Type", "application/json");
-    // JSON data
-    JsonDocument doc;
+    // Check heap before API call
+    size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    Serial.printf("API task heap: %u bytes\n", freeHeap);
+    
+    // JSON data - reduced size
+    DynamicJsonDocument doc(1024);
     doc["idvoi"] = msg->Idvoi;
     doc["today"] = msg->Today;
     doc["request_code"] = msg->Request_Code;
@@ -218,40 +222,61 @@ void callAPIServerGetLogLoss(void *param){
     // Send the POST request
     int httpResponseCode = http.POST(json.c_str());
 
+    // show nội dụng gởi về từ http
+    String response = http.getString();
+    // Serial.printf("json: %s\n", response.c_str());
+
+
     if (httpResponseCode > 0 && httpResponseCode == 200)
     {
-      String response = http.getString();
-      JsonDocument doc;
-      DeserializationError error = deserializeJson(doc, response);
-      if (!error)
+      // Auto-size document capacity based on response length
+      size_t respLen = response.length();
+      Serial.printf("API response length: %u\n", (unsigned)respLen);
+
+      const size_t maxCapacity = 16384; // upper bound
+      size_t capacity = 1024;
+      while (capacity < respLen * 2 && capacity < maxCapacity) capacity *= 2;
+
+      DeserializationError error;
+      bool parsed = false;
+      while (capacity <= maxCapacity)
       {
-        // Get the size of the array
-        JsonArray array = doc.as<JsonArray>();
-        int arraySize = array.size();
-        // Serial.printf("Len: %d\n", arraySize);
-        // Loop through the JSON array and store the values in the integer array
-        if (arraySize > 0 ){
-          for (int i = 0; i < arraySize; i++)
-          {
-            DtaLogLoss dt;
-            signed int counter = array[i]["MissingIdLog"];
-            // dt.Logid = value;
-            Serial.println("Counter Loss: " + String(counter));
-            dt.Logid = counter;
-            // Serial.print("gapCounter: "); Serial.print(gapCounter);Serial.print("  idLog: "); Serial.print(idLog);Serial.print("  Counter: "); Serial.println(counter);
-            /* tính toán lại Logid dựa vào counter và chênh lệch giauwx counter và IdLog trước đó*/
-            if (xQueueSend(LogIdLossQueue, &dt, portMAX_DELAY) != pdPASS)
-            {
-                Serial.println("IdLog node add");
+        DynamicJsonDocument doc(capacity);
+        error = deserializeJson(doc, response);
+        if (!error)
+        {
+          JsonArray array = doc.as<JsonArray>();
+          int arraySize = array.size();
+          if (arraySize > 0 ){
+            int sent = 0;
+            for (JsonObject obj : array) {
+              long counter = obj["MissingIdLog"] | obj["MissingIDLog"] | -1;
+              if (counter > 0) {
+                DtaLogLoss dt;
+                dt.Logid = static_cast<int>(counter);
+                Serial.println("Counter Loss: " + String(counter));
+                if (xQueueSend(LogIdLossQueue, &dt, pdMS_TO_TICKS(50)) != pdPASS) {
+                  Serial.println("IdLog node add");
+                }
+                // avoid starving other tasks
+                if ((++sent % 10) == 0) vTaskDelay(pdMS_TO_TICKS(1));
+              }
             }
+          } else {
+            Serial.println("No Data Fined");
           }
-        }else {
-          Serial.println("No Data Fined");
+          parsed = true;
+          break;
+        }
+        if (error == DeserializationError::NoMemory) {
+          Serial.printf("JSON NoMemory with capacity %u, retrying...\n", (unsigned)capacity);
+          capacity *= 2;
+        } else {
+          break;
         }
       }
-      else
-      {
-        Serial.printf("Error parsing JSON: %s", error.c_str());
+      if (!parsed) {
+        Serial.printf("Error parsing JSON: %s\n", error.c_str());
       }
     }
     else

@@ -38,30 +38,36 @@ void ganLog(byte *buffer, PumpLog &log) {
 }
 
 // Hàm chuyển đổi cấu trúc PumpLog sang JSON
-String convertPumpLogToJson(const PumpLog &log) {
-  JsonDocument jsonDoc; // Tạo bộ nhớ cho JSO
-  // Gán giá trị từ cấu trúc vào JSON
-  // jsonDoc["send1"] = log.send1;
-  // jsonDoc["send2"] = log.send2;
-  jsonDoc["idVoi"] = log.idVoi;
-  jsonDoc["posLogCot"] = log.viTriLogCot;
-  jsonDoc["posLogData"] = log.viTriLogData;
-  jsonDoc["numsBom"] = log.maLanBom;
-  jsonDoc["LitBom"] = log.soLitBom;
-  jsonDoc["donGia"] = log.donGia;
-  jsonDoc["soTotalTong"] = log.soTotalTong;
-  jsonDoc["soTienBom"] = log.soTienBom;
-  jsonDoc["ngay"] = log.ngay;
-  jsonDoc["thang"] = log.thang;
-  jsonDoc["nam"] = log.nam;
-  jsonDoc["gio"] = log.gio;
-  jsonDoc["phut"] = log.phut;
-  jsonDoc["giay"] = log.giay;
-  // jsonDoc["checksum"] = log.checksum;
-  // jsonDoc["send3"] = log.send3;
+String convertPumpLogToJson(const PumpLog &log)
+{
+  DynamicJsonDocument doc(256); // Use DynamicJsonDocument for v6
 
-  // Chuyển đổi JSON thành chuỗi
+  // doc["idVoi"] = log.idVoi;
+  // doc["maLanBom"] = log.maLanBom;
+  // doc["soLitBom"] = log.soLitBom;
+  // doc["donGia"] = log.donGia;
+  // doc["soTotalTong"] = log.soTotalTong;
+  // doc["soTienBom"] = log.soTienBom;
+  // char timestamp[20];
+  // sprintf(timestamp, "20%02d-%02d-%02d %02d:%02d:%02d", log.nam, log.thang, log.ngay, log.gio, log.phut, log.giay);
+  // doc["timestamp"] = timestamp;
+
+  doc["idVoi"] = log.idVoi;
+  doc["posLogCot"] = log.viTriLogCot;
+  doc["posLogData"] = log.viTriLogData;
+  doc["numsBom"] = log.maLanBom;
+  doc["LitBom"] = log.soLitBom;
+  doc["donGia"] = log.donGia;
+  doc["soTotalTong"] = log.soTotalTong;
+  doc["soTienBom"] = log.soTienBom;
+  doc["ngay"] = log.ngay;
+  doc["thang"] = log.thang;
+  doc["nam"] = log.nam;
+  doc["gio"] = log.gio;
+  doc["phut"] = log.phut;
+  doc["giay"] = log.giay;
+
   String jsonString;
-  serializeJson(jsonDoc, jsonString);
+  serializeJson(doc, jsonString);
   return jsonString;
 }

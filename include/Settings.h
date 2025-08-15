@@ -1,6 +1,8 @@
 #ifndef SETTINGS_H
 #define SETTINGS_H
 
+#include <cstdint>
+
 // Include credentials từ file riêng
 #include "Credentials.h"
 // Thông số của RS485
@@ -11,26 +13,27 @@
 #define WIFI_TIMEOUT_MS     20000
 #define OUT1                15    // 15 bo A2
 #define OUT2                2     // 2  bo A2   , 18 Còi của bo ASR
-#define INPUT1              36      
+#define INPUT1              36
+#define RESET_CONFIG_PIN    0     // GPIO0 - nút BOOT trên ESP32, có thể thay đổi      
 #define FLASH_DATA_FILE "/log.bin" // File lưu dữ liệu log
 // File lưu thông tin trên LittleFS
-const char* configFile = "/config.txt";
+extern const char* configFile;
 // Định nghĩa tên đăng nhập và mật khẩu cho trang cấu hình
-const char* adminUser = ADMIN_USERNAME;
-const char* adminPass = ADMIN_PASSWORD;
+extern const char* adminUser;
+extern const char* adminPass;
 
 
 // Thông tin hệ thống mqtt
 
-const char* mqttServer =    "103.57.221.161"; // Server mặc định, sẽ được cập nhật từ API
-const int   mqttPort =        1883;                  
-const char* mqttUser =      MQTT_USERNAME;
-const char* mqttPassword =  MQTT_PASSWORD;
+extern const char* mqttServer; // Server mặc định, sẽ được cập nhật từ API
+extern const int   mqttPort;                  
+extern const char* mqttUser;
+extern const char* mqttPassword;
 
 // Định nghĩa máy chủ NTP
-const char* ntpServer = "time.google.com";
-const long  gmtOffset_sec = 3600 * 7;  // Múi giờ GMT+7
-const int   daylightOffset_sec = 0;
+extern const char* ntpServer;
+extern const long  gmtOffset_sec;  // Múi giờ GMT+7
+extern const int   daylightOffset_sec;
 
 
 // Cấu hình của Ethernet Lan Ethernet (LAN8720) I/O define:
@@ -54,19 +57,19 @@ const int   daylightOffset_sec = 0;
 // char* wifi_password = "T@nqu0c1"; // atcsoft12345
 
 // Khai báo SSID và Password mặc định
-char TopicMqtt[32] = "QA-T01-V01"; // SSID mặc định
-char wifi_ssid[32] = "Quoc Thu"; // SSID mặc định
-char wifi_password[64] = "T@nqu0c1";     // Mật khẩu mặc định (rỗng)
+extern char TopicMqtt[32]; // SSID mặc định
+extern char wifi_ssid[32]; // SSID mặc định
+extern char wifi_password[64];     // Mật khẩu mặc định (rỗng)
 
-const char* TopicLogError = "/Error/";
-const char* TopicRestart  = "/Restart/";
-const char* TopicGetLogIdLoss = "/GetLogIdLoss/";
-const char* TopicSendData = "/GetData/";
-const char* TopicStatus   = "/GetStatus/";
-const char* TopicShift    = "/Shift/";
-const char* TopicChange   = "/Change/"; // Topic thay đổi trạng thái bán hàng: bán hàng/ Test bồn/ Lường  
+extern const char* TopicLogError;
+extern const char* TopicRestart;
+extern const char* TopicGetLogIdLoss;
+extern const char* TopicSendData;
+extern const char* TopicStatus;
+extern const char* TopicShift;
+extern const char* TopicChange; // Topic thay đổi trạng thái bán hàng: bán hàng/ Test bồn/ Lường  
 
-const uint8_t idVoiList[] = {99}; // Thêm các ID vòi khác tại đây
+extern const uint8_t idVoiList[]; // Thêm các ID vòi khác tại đây
 
 
 #endif // STRUCTDATA_H

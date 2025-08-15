@@ -8,7 +8,7 @@
 /// @brief Convert Settings hexa qua Settings String
 /// @param hexString
 /// @param settings
-void convertSettingsFromHex(const String &hexString, Settings &settings)
+inline void convertSettingsFromHex(const String &hexString, Settings &settings)
 {
   int len = hexString.length();
   int mqttServerSize = sizeof(settings.MqttServer) * 2;
@@ -32,7 +32,7 @@ void convertSettingsFromHex(const String &hexString, Settings &settings)
 /// @brief Định nghĩa lại chuổi setting qua dạng hexa để lưu tối ưu bộ nhớ
 /// @param settings
 /// @param hexString
-void convertSettingsToHex(const Settings &settings, String &hexString)
+inline void convertSettingsToHex(const Settings &settings, String &hexString)
 {
   char buffer[5]; // Đủ để chứa 4 ký tự hexa cho PortMqtt và ký tự null
   char buffer2[3];
@@ -58,9 +58,9 @@ void convertSettingsToHex(const Settings &settings, String &hexString)
 /// @brief Hàm dùng để tách chuổi đọc được, lấy giá trị từ chuổi đọc được, giống hàm Mid trong excel
 /// @param data : Chuổi cần đọc
 /// @param start: Vị trí bắt đầu cắt chuổi
-/// @param end : Vi trí kết thúc chuổi
+/// @param end : Vi trí kết thúc chuỗi
 /// @return
-String getValue(String data, String start, String end)
+inline String getValue(String data, String start, String end)
 {
   int startIndex = data.indexOf(start);
   if (startIndex == -1)
@@ -77,7 +77,7 @@ String getValue(String data, String start, String end)
 /// @brief Lọc các ký tự lạ trong serial
 /// @param input
 /// @return
-String clearnData(String input)
+inline String clearnData(String input)
 {
   String result = "";
   for (int i = 0; i < input.length(); i++)
@@ -96,7 +96,7 @@ String clearnData(String input)
 /// @param payload
 /// @param length
 /// @param deviceGetStatus
-void parsePayload_IdLogStatus(byte *payload, unsigned int length, DeviceGetStatus *deviceGetStatus)
+inline void parsePayload_IdLogStatus(byte *payload, unsigned int length, DeviceGetStatus *deviceGetStatus)
 {
   // Tạo một buffer cho payload để xử lý với ArduinoJson
   char json[length + 1];
@@ -104,7 +104,7 @@ void parsePayload_IdLogStatus(byte *payload, unsigned int length, DeviceGetStatu
   json[length] = '\0'; // Đảm bảo chuỗi kết thúc
 
   // Khởi tạo đối tượng JSON document
-  JsonDocument doc;
+  DynamicJsonDocument doc(1024);
 
   // Phân tích chuỗi JSON
   DeserializationError error = deserializeJson(doc, json);
@@ -123,20 +123,33 @@ void parsePayload_IdLogStatus(byte *payload, unsigned int length, DeviceGetStatu
 }
 
 // Hàm để phân tích payload và gán vào struct GetIdLogLoss
-void parsePayload_IdLogLoss(byte *payload, unsigned int length, GetIdLogLoss *&getLogIdLoss, CompanyInfo *companyInfo) {
+inline void parsePayload_IdLogLoss(byte *payload, unsigned int length, GetIdLogLoss *getLogIdLoss, CompanyInfo *companyInfo) {
+  // Check heap before parsing
+  size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  Serial.printf("Heap before JSON parse: %u bytes, payload length: %u\n", freeHeap, length);
+  
+  // Safety check for payload size
+  if (length > 1024) {
+    Serial.printf("Payload too large: %u bytes, truncating to 1024\n", length);
+    length = 1024;
+  }
+  
   // Tạo một buffer cho payload để xử lý với ArduinoJson
   char json[length + 1];
   memcpy(json, payload, length);
   json[length] = '\0'; // Đảm bảo chuỗi kết thúc
 
-  // Khởi tạo đối tượng JSON document
-  JsonDocument doc;
+  Serial.printf("json:%s\n", json);
+
+  // Khởi tạo đối tượng JSON document với size lớn hơn
+  DynamicJsonDocument doc(2048);
 
   // Phân tích chuỗi JSON
   DeserializationError error = deserializeJson(doc, json);
   if (error) {
-    Serial.print("JSON parse failed: ");
-    Serial.println(error.c_str());
+    Serial.printf("Error parsing JSON: %s", error.c_str());
+    size_t afterHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    Serial.printf("Heap: %u\n", afterHeap);
     return;
   }
 
@@ -144,10 +157,11 @@ void parsePayload_IdLogLoss(byte *payload, unsigned int length, GetIdLogLoss *&g
   strlcpy(getLogIdLoss->Idvoi, doc["Idvoi"] | "", sizeof(getLogIdLoss->Idvoi));
   strlcpy(getLogIdLoss->Request_Code, doc["Request_Code"] | "", sizeof(getLogIdLoss->Request_Code));
   strlcpy(getLogIdLoss->Today, doc["Today"] | "", sizeof(getLogIdLoss->Today));
-  strlcpy(getLogIdLoss->CompanyId, doc["CompanyId"] | "", sizeof(companyInfo->Mst));
+  // Use the correct destination buffer size
+  strlcpy(getLogIdLoss->CompanyId, doc["CompanyId"] | "", sizeof(getLogIdLoss->CompanyId));
 }
 
-void setUpTime(TimeSetup *&currentTime,const tm timeinfo){
+inline void setUpTime(TimeSetup *currentTime,const tm timeinfo){
   // Gán lại giá trị vào struct TimeSetup
   currentTime->ngay = timeinfo.tm_mday;
   currentTime->thang = timeinfo.tm_mon +1;

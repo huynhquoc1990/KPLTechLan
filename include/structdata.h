@@ -36,19 +36,19 @@ struct DeviceStatus
   char ipAddress[20];
 };
 
-struct logTagMonTech {
-  char id[6];
-  char Ma_GD[32];
-  char Kieu[25];
-  char Ky_Hieu[20];
-  char Mau[5];
-  char Ngay[10];
-  char Gio[10];
-  char NhienLieu[30];
-  char Tien[10];
-  char Dongia[8];
-  char Soluong[8];
-};
+// struct logTagMonTech {
+//   char id[6];
+//   char Ma_GD[32];
+//   char Kieu[25];
+//   char Ky_Hieu[20];
+//   char Mau[5];
+//   char Ngay[10];
+//   char Gio[10];
+//   char NhienLieu[30];
+//   char Tien[10];
+//   char Dongia[8];
+//   char Soluong[8];
+// };
 
 struct CompanyInfo
 {

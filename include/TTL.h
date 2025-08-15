@@ -5,8 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// Hàm gửi lệnh truy xuất log loss
-void sendLogRequest(uint16_t logPosition) {
+inline void sendLogRequest(uint16_t logPosition) {
     // Kiểm tra giới hạn vị trí log
     if (logPosition < 1 || logPosition > 2046) {
         Serial.println("Invalid log position. Must be between 1 and 2046.");
@@ -40,8 +39,7 @@ void sendLogRequest(uint16_t logPosition) {
     // Serial.println();
 }
 
-//  Lệnh khởi động esp32 để thông báo với KPL là đã khởi động xong, sãn sàng nhận tín hiệu từ KPL
-void sendStartupCommand() {
+inline void sendStartupCommand() {
     // Dữ liệu cần gửi
     uint8_t byte1 = 0x7D;  // Byte đầu tiên
     uint8_t control1 = 0x33;  // Control 1
@@ -68,7 +66,7 @@ void sendStartupCommand() {
 }
 
 
-void getLogData(String command, char *&param)
+inline void getLogData(String command, char *&param)
 {
   char *tempdata = (char*)pvPortMalloc(LOG_SIZE * sizeof(char));
   if (tempdata == NULL)
@@ -126,7 +124,7 @@ void getLogData(String command, char *&param)
 
 
 // Hàm đọc phản hồi
-bool readResponse() {
+inline bool readResponse() {
     uint8_t response[4]; // Phản hồi yêu cầu có 4 byte
     unsigned long startTime = millis();
 
@@ -171,7 +169,7 @@ bool readResponse() {
 }
 
 // Hàm gửi lệnh SET thời gian
-void sendSetTimeCommand(TimeSetup *time) {
+inline void sendSetTimeCommand(TimeSetup *time) {
     uint8_t buffer[10]; // Mảng lưu dữ liệu lệnh
     uint8_t ngay = time->ngay;   // Ngày
     uint8_t thang = time->thang;  // Tháng

@@ -1,888 +1,900 @@
 #include <Arduino.h>
-#include <Wire.h>
-// #include <ETH.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
-#include <PubSubClient.h>
-#include <WiFi.h>
-#include "Settings.h"
+#include <ESPAsyncWebServer.h>
 #include <esp_task_wdt.h>
-#include <EEPROM.h>
-#include <HTTPClient.h>
-#include <vector>
-#include <math.h> // Thư viện math.h để sử dụng hàm floor(
-#include <driver/uart.h>
-#include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <structdata.h>
-#include <ESP32Ping.h>
-#include <Setup.h>
-#include <FlashFile.h>
-#include <Inits.h>
-#include <Api.h>
-#include <TTL.h>
-#include <WebServer.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+
+// Local includes
+#include "Settings.h"
+#include "structdata.h"
+#include "FlashFile.h"
+#include "Inits.h"
+#include "Api.h"
+#include "TTL.h"
+#include "Setup.h"
 #include "Webservice.h"
-#include <ESPAsyncWebServer.h>
-// Khởi tạo client
+#include "WiFiManager.h"
+#include "MQTTManager.h"
+#include "RS485Manager.h"
+#include "SystemManager.h"
+#include "FlashFile.h"
 
-// Cấu hình Ethernet
-byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED}; // Địa chỉ MAC duy nhất
-WiFiClient ethClient;                              // Ethernet client
-PubSubClient client(ethClient);                    // MQTT client sử dụng Ethernet client
-// Biến trạng thái cho kết nối và các tác vụ
-// bool ethConnected = false;
-unsigned long counterReset = 0;
-bool ethPreviouslyConnected = false; // Cờ kiểm tra trạng thái kết nối trước đó
+// ============================================================================
+// GLOBAL VARIABLES - Tối ưu hóa memory allocation
+// ============================================================================
 
-// Khai báo dữ liệu struct data
-DeviceStatus *deviceStatus = new DeviceStatus;
-CompanyInfo *companyInfo = new CompanyInfo; // lấy thông tin của company khi internet được kết nối
-Settings *settings = new Settings;
-TimeSetup *timeSetup = new TimeSetup;
-GetIdLogLoss *receivedMessage = new GetIdLogLoss;
+// Core system objects - sử dụng smart pointers nếu có thể
+static DeviceStatus deviceStatus;
+static CompanyInfo companyInfo;
+static Settings settings;
+static TimeSetup timeSetup;
+static GetIdLogLoss receivedMessage;
+bool inConfigPortal = false;
 
-uint32_t currentId = 0;                                        // ID vô hạn
-const int numOfVoi = sizeof(idVoiList) / sizeof(idVoiList[0]); // Số lượng vòi
+// System state
+static uint32_t currentId = 0;
+static bool statusConnected = false;
+static bool isLoggedIn = false;
+static bool mqttTopicsConfigured = false;
+static unsigned long counterReset = 0;
+static unsigned long lastHeapCheck = 0;
+static String systemStatus = "OK";
+static String lastError = "";
 
-// Thông tin chung của topic mqtt connected
-char fullTopic[50]; // Đảm bảo kích thước đủ lớn
-char topicStatus[50];
-char topicError[50];
-char topicRestart[50];
-char topicGetLogIdLoss[50];
-char topicShift[50];
-char topicChange[50];
-char shift[30];
+// MQTT topics - tối ưu memory allocation
+static char fullTopic[64];
+static char topicStatus[64];
+static char topicError[64];           // full topic with device id (for publish if needed)
+static char topicErrorSub[64];        // wildcard subscription (e.g., 11223311A/Error/#)
+static char topicErrorPrefix[64];     // prefix match (e.g., 11223311A/Error/)
+static char topicRestart[64];
+static char topicGetLogIdLoss[64];
+static char topicShift[64];
+static char topicChange[64];
 
-// Khai báo queue để lưu trữ dữ liệu trước khi gửi qua MQTT
-QueueHandle_t mqttQueue;
-QueueHandle_t logIdLossQueue;
+// FreeRTOS objects
+static QueueHandle_t mqttQueue = NULL;
+static QueueHandle_t logIdLossQueue = NULL;
+static SemaphoreHandle_t flashMutex = NULL;
+static SemaphoreHandle_t systemMutex = NULL;
 
-// Khai báo Mutex
-SemaphoreHandle_t flashMutex;
+// Task handles
+static TaskHandle_t rs485TaskHandle = NULL;
+static TaskHandle_t mqttTaskHandle = NULL;
+static TaskHandle_t wifiTaskHandle = NULL;
+static TaskHandle_t webServerTaskHandle = NULL;
+static TaskHandle_t resendLogRequestTaskHandle = NULL;
 
-// Khai báo handler task
-TaskHandle_t Handle_Rs485 = NULL;
-TaskHandle_t Handle_MqttSend = NULL;
-TaskHandle_t getIdLogLossHandle = NULL;
-// TaskHandle_t ethernetTaskhandle = NULL;
-TaskHandle_t Handle_Wifi = NULL;
+// WiFi objects
+static WiFiClient wifiClient;
+static PubSubClient mqttClient(wifiClient);
+static AsyncWebServer webServer(80);
+WiFiManager *wifiManager = nullptr;
 
-// Function prototypes
-void formatLittleFS();
-void runCommandRs485(void *parameter);
-void parseAndConvertToJson(String input);
-void mqttCallback(char *topic, byte *payload, unsigned int length);
-void getIdLogLoss(void *param);
-// void ethernetTask(void *pvParameters);
-void getInfoConnectMqtt();
-void checkInternetConnection();
-void sendDataCommand(String command, char *&param);
-void processAllVoi(TimeSetup *time); // Xử lý tất cả các ID vòi
-void mqttSendTask(void *parameter);
-void checkHeap();
-void readRs485(uint8_t *);
-void ConnectWifiMqtt(void *parameter);
-eTaskState checkTaskState(TaskHandle_t taskHandle);
+// Reset button state
+static struct
+{
+  unsigned long pressTime = 0;
+  bool isPressed = false;
+  bool inProgress = false;
+} resetButton;
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+// Task functions
+void rs485Task(void *parameter);
+void mqttTask(void *parameter);
+void wifiTask(void *parameter);
 void webServerTask(void *parameter);
-void ConnectedKPLBox(void * param);
-// Bổ xung hàm scanwwifi và kết nối wifi theo kiểu bất đồng bộ
-void scanWiFi();
-void connectWiFi(AsyncWebServerRequest *request);
+void wifiRescanTask(void *parameter);
 
-bool statusConnected = false;
+// System functions
+void systemInit();
+void systemCheck();
+void handleResetButton();
+void checkHeap();
+void setupTime();
+void setSystemStatus(const String &status, const String &error = "");
+void adjustThermals();
 
-// Khởi tạo WebServer
-// WebServer server(80);
-// Khoi tạo webserver bất đồng bộ
-AsyncWebServer server(80);
-// Biến để kiểm tra trạng thái đăng nhập
-bool isLoggedIn = false;
+// MQTT functions
+void mqttCallback(char *topic, byte *payload, unsigned int length);
+void setupMQTTTopics();
+void connectMQTT();
+void sendDeviceStatus();
 
-const char *apSSID = AP_SSID;
-String wifiList = "";
+// Missing function declarations
+void sendLogRequest(uint32_t logId);
+void processAllVoi(TimeSetup *time);
+uint8_t calculateChecksum_LogData(const uint8_t *data, size_t length);
+void ganLog(byte *buffer, PumpLog &log);
+void ConnectedKPLBox(void *param);
+void resendLogRequest(void *param);
+
+// ============================================================================
+// MAIN SETUP & LOOP
+// ============================================================================
+
+void setup()
+{
+  Serial.begin(115200);
+  Serial.println("\n=== KPL Gas Device Starting ===");
+
+  // Initialize system
+  systemInit();
+
+  // Create tasks with optimized stack sizes
+  xTaskCreatePinnedToCore(rs485Task, "RS485", 8192, NULL, 3, &rs485TaskHandle, 0);
+  xTaskCreatePinnedToCore(wifiTask, "WiFi", 8192, NULL, 2, &wifiTaskHandle, 1);
+  xTaskCreatePinnedToCore(mqttTask, "MQTT", 8192, NULL, 2, &mqttTaskHandle, 1);
+  // xTaskCreatePinnedToCore(resendLogRequest, "ResendLogRequest", 8192, NULL, 2, &resendLogRequestTaskHandle, 1);
+
+  Serial.println("System initialized successfully");
+}
+
+void loop()
+{
+  // Main loop chỉ xử lý các tác vụ nhẹ
+  handleResetButton();
+  systemCheck();
+
+  // Yield cho các task khác
+  vTaskDelay(pdMS_TO_TICKS(100));
+  yield();
+  // Feed watchdog for loopTask explicitly
+  esp_task_wdt_reset();
+}
+
+// ============================================================================
+// SYSTEM INITIALIZATION
+// ============================================================================
+
+void systemInit()
+{
+  // GPIO setup
+  pinMode(OUT1, OUTPUT);
+  pinMode(OUT2, OUTPUT);
+  pinMode(RESET_CONFIG_PIN, INPUT_PULLUP);
+
+  // Watchdog setup
+  esp_task_wdt_init(60, true); // Increase timeout to 60s for safety during WiFi ops
+  esp_task_wdt_add(NULL);
+
+  // Initialize RS485
+  Serial2.begin(RS485BaudRate, SERIAL_8N1, RX_PIN, TX_PIN);
+
+  // Initialize FreeRTOS objects
+  mqttQueue = xQueueCreate(10, sizeof(PumpLog));
+  logIdLossQueue = xQueueCreate(50, sizeof(DtaLogLoss));
+  flashMutex = xSemaphoreCreateMutex();
+  systemMutex = xSemaphoreCreateMutex();
+
+  if (!mqttQueue || !logIdLossQueue || !flashMutex || !systemMutex)
+  {
+    Serial.println("ERROR: Failed to create FreeRTOS objects!");
+    setSystemStatus("ERROR", "Failed to create FreeRTOS objects");
+    ESP.restart();
+  }
+
+  // Initialize file system
+  if (!initLittleFS())
+  {
+    Serial.println("ERROR: Failed to initialize LittleFS!");
+    setSystemStatus("ERROR", "Failed to initialize LittleFS");
+    ESP.restart();
+  }
+
+  // Initialize WiFiManager
+  wifiManager = new WiFiManager(&webServer);
+
+  // Load system data
+  readFlashSettings(flashMutex, deviceStatus, counterReset);
+  currentId = initializeCurrentId(flashMutex);
+
+  // Initialize WiFi
+  WiFi.mode(WIFI_STA);
+
+  // Initialize MQTT
+  mqttClient.setServer(mqttServer, 1883);
+  mqttClient.setBufferSize(1024); // Increase buffer size from default 128
+  mqttClient.setCallback(mqttCallback);
+  
+  Serial.printf("MQTT client initialized - Buffer size: %d\n", mqttClient.getBufferSize());
+
+  // Send startup commands
+  sendStartupCommand();
+  delay(1000);
+  sendStartupCommand();
+
+  Serial.printf("System initialized - Current ID: %u\n", currentId);
+}
+
+// ============================================================================
+// SYSTEM MONITORING
+// ============================================================================
+
+void systemCheck()
+{
+  static unsigned long lastCheck = 0;
+  unsigned long now = millis();
+
+  // Check every 10 seconds
+  if (now - lastCheck >= 10000)
+  {
+    lastCheck = now;
+
+    // Reset watchdog
+    esp_task_wdt_reset();
+
+    // Check heap memory
+    checkHeap();
+
+    // Adjust thermals based on die temperature
+    adjustThermals();
+
+    // Send status via MQTT if connected and topics configured
+    if (mqttClient.connected() && mqttTopicsConfigured)
+    {
+      sendDeviceStatus();
+    }
+
+    // Check task states
+    if (rs485TaskHandle && eTaskGetState(rs485TaskHandle) == eDeleted)
+    {
+      Serial.println("WARNING: RS485 task deleted, restarting...");
+      setSystemStatus("WARNING", "RS485 task deleted and restarted");
+      xTaskCreatePinnedToCore(rs485Task, "RS485", 8192, NULL, 3, &rs485TaskHandle, 0);
+    }
+  }
+}
+
+void checkHeap()
+{
+  size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  size_t minFreeHeap = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+
+  deviceStatus.heap = freeHeap;
+  deviceStatus.free = minFreeHeap;
+  deviceStatus.temperature = temperatureRead();
+  // Optional: smooth die temperature to avoid spikes
+  static float smoothedTemp = 0.0f;
+  if (smoothedTemp == 0.0f) smoothedTemp = deviceStatus.temperature;
+  smoothedTemp = 0.7f * smoothedTemp + 0.3f * deviceStatus.temperature;
+  deviceStatus.temperature = smoothedTemp;
+  deviceStatus.counterReset = counterReset;
+
+  // Log memory status
+  Serial.printf("Heap: %u free, %u min free, Temp: %.1f°C\n",
+                freeHeap, minFreeHeap, deviceStatus.temperature);
+
+  // Memory warning
+  if (freeHeap < 10000)
+  {
+    Serial.println("WARNING: Low memory!");
+    setSystemStatus("WARNING", "Low memory: " + String(freeHeap) + " bytes");
+  }
+  else if (systemStatus == "WARNING" && lastError.indexOf("Low memory") >= 0)
+  {
+    // Clear memory warning if heap is back to normal
+    setSystemStatus("OK");
+  }
+}
+
+void adjustThermals()
+{
+  static bool thermallyReduced = false;
+  float dieTemp = deviceStatus.temperature;
+
+  // In configuration portal, force minimal performance to keep temps low
+  if (inConfigPortal)
+  {
+    setCpuFrequencyMhz(80);
+    WiFi.setSleep(true);
+    WiFi.setTxPower(WIFI_POWER_MINUS_1dBm);
+    if (!thermallyReduced)
+    {
+      Serial.println("Thermal: CONFIG portal - CPU 80MHz, TX power -1dBm, modem sleep ON");
+      thermallyReduced = true;
+    }
+    return;
+  }
+
+  if (!thermallyReduced && dieTemp > 80.0f)
+  {
+    setCpuFrequencyMhz(160);
+    WiFi.setSleep(true);
+    WiFi.setTxPower(WIFI_POWER_2dBm);
+    thermallyReduced = true;
+    Serial.println("Thermal: reduced CPU to 160MHz, TX power 2dBm, modem sleep ON");
+  }
+  else if (thermallyReduced && dieTemp < 70.0f)
+  {
+    inConfigPortal = false;
+    setCpuFrequencyMhz(240);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    thermallyReduced = false;
+    Serial.println("Thermal: restored CPU to 240MHz, TX power 8.5dBm");
+  }
+}
+
+void setSystemStatus(const String &status, const String &error)
+{
+  systemStatus = status;
+  lastError = error;
+
+  if (status != "OK")
+  {
+    Serial.printf("[STATUS] %s: %s\n", status.c_str(), error.c_str());
+  }
+}
+
+// ============================================================================
+// RESET BUTTON HANDLING
+// ============================================================================
+
+void handleResetButton()
+{
+  int buttonState = digitalRead(RESET_CONFIG_PIN);
+
+  if (buttonState == LOW)
+  { // Button pressed
+    if (!resetButton.isPressed)
+    {
+      resetButton.isPressed = true;
+      resetButton.pressTime = millis();
+      Serial.println("Reset button pressed - hold for 5 seconds");
+      digitalWrite(OUT2, HIGH);
+    }
+
+    // Show countdown
+    unsigned long pressDuration = millis() - resetButton.pressTime;
+    if (pressDuration >= 5000 && !resetButton.inProgress)
+    {
+      resetButton.inProgress = true;
+      Serial.println("Resetting WiFi configuration...");
+
+      // Visual feedback
+      for (int i = 0; i < 5; i++)
+      {
+        digitalWrite(OUT2, HIGH);
+        delay(200);
+        digitalWrite(OUT2, LOW);
+        delay(200);
+      }
+
+      // Reset config
+      if (LittleFS.exists("/config.txt"))
+      {
+        LittleFS.remove("/config.txt");
+        Serial.println("WiFi config deleted");
+      }
+
+      Serial.println("Restarting in 3 seconds...");
+      delay(3000);
+      ESP.restart();
+    }
+  }
+  else
+  {
+    if (resetButton.isPressed)
+    {
+      unsigned long pressDuration = millis() - resetButton.pressTime;
+      resetButton.isPressed = false;
+      resetButton.inProgress = false;
+      digitalWrite(OUT2, LOW);
+      Serial.println("Reset button released");
+
+      // Short press: trigger WiFi rescan if in config portal (AP mode)
+      if (pressDuration < 1000 && inConfigPortal && wifiManager != nullptr)
+      {
+        Serial.println("Short press detected - triggering WiFi rescan...");
+        xTaskCreate(wifiRescanTask, "WiFiRescan", 4096, NULL, 2, NULL);
+      }
+    }
+  }
+}
+
+// ============================================================================
+// WIFI TASK
+// ============================================================================
+
+void wifiTask(void *parameter)
+{
+  Serial.println("WiFi task started");
+  esp_task_wdt_add(NULL);
+
+  // Chỉ kiểm tra config một lần khi khởi động
+  if (!wifiManager->checkWiFiConfig())
+  {
+    Serial.println("No valid WiFi config found. Entering AP configuration mode.");
+
+    // Tạm dừng các task khác để ưu tiên
+    if (rs485TaskHandle != NULL)
+      vTaskSuspend(rs485TaskHandle);
+    if (mqttTaskHandle != NULL)
+      vTaskSuspend(mqttTaskHandle);
+
+    // Bật chế độ AP, quét Wi-Fi một lần và khởi động web server
+    wifiManager->startConfigurationPortal();
+
+    Serial.println("AP Mode and Web Server started. WiFi task will now suspend.");
+
+    // Restore CPU when leaving config portal (will resume after restart)
+    setCpuFrequencyMhz(240);
+    // Deregister from WDT before suspending indefinitely
+    esp_task_wdt_delete(NULL);
+    // Tự treo task này, chờ restart từ web server
+    vTaskSuspend(NULL);
+  }
+
+  // Nếu có config, tiếp tục vòng lặp kết nối bình thường
+  while (true)
+  {
+    esp_task_wdt_reset();
+    if (WiFi.status() != WL_CONNECTED)
+    {
+      Serial.println("Attempting to connect to saved WiFi...");
+      if (wifiManager->connectToWiFi())
+      {
+        Serial.println("WiFi connected successfully.");
+        setupTime();
+        setupMQTTTopics();
+        statusConnected = true;
+      }
+      else
+      {
+        static uint32_t cooldownSeconds = 10; // exponential backoff, capped
+        Serial.printf("WiFi connection failed, cooling radio for %lus...\n", cooldownSeconds);
+        setSystemStatus("ERROR", "WiFi connection failed");
+
+        // Turn radio off during cooldown to reduce temperature
+        WiFi.disconnect(true, true);
+        WiFi.mode(WIFI_OFF);
+        setCpuFrequencyMhz(160);
+        for (uint32_t i = 0; i < cooldownSeconds; i++) {
+          esp_task_wdt_reset();
+          vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+
+        // Restore for next attempt
+        WiFi.mode(WIFI_STA);
+        WiFi.setSleep(true);
+        setCpuFrequencyMhz(240);
+
+        // Increase backoff up to 60s
+        if (cooldownSeconds < 60) {
+          cooldownSeconds = cooldownSeconds < 30 ? cooldownSeconds * 2 : 60;
+        }
+      }
+    }
+    else
+    {
+      // Đã kết nối, kiểm tra định kỳ trong 30 step, mỗi step reset WDT
+      for (int i = 0; i < 30; i++) {
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+      }
+    }
+    yield();
+  }
+}
+
+// ============================================================================
+// MQTT TASK
+// ============================================================================
+
+void mqttTask(void *parameter)
+{
+  Serial.println("MQTT task started");
+  esp_task_wdt_add(NULL);
+
+  while (true)
+  {
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      if (!mqttClient.connected())
+      {
+        connectMQTT();
+      }
+      else
+      {
+        // Process MQTT messages - CRITICAL for callback to work
+        mqttClient.loop();
+
+        // Process MQTT queue
+        PumpLog log;
+        if (xQueueReceive(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
+        {
+          sendMQTTData(log);
+        }
+        
+        // Additional loop call to ensure callback processing
+        mqttClient.loop();
+      }
+    }
+
+    // System monitoring (every 10 seconds)
+    systemCheck();
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_task_wdt_reset();
+    yield();
+  }
+}
+
+// ============================================================================
+// RS485 TASK
+// ============================================================================
+
+void rs485Task(void *parameter)
+{
+  Serial.println("RS485 task started");
+
+  byte buffer[LOG_SIZE];
+  unsigned long lastSendTime = 0;
+  // esp_task_wdt_add(NULL);
+  
+  while (true)
+  {
+    // Read RS485 data
+    readRS485Data(buffer);
+
+    // Send log requests every 2 seconds (reduce heat/power)
+    if (millis() - lastSendTime >= 2000)
+    {
+      lastSendTime = millis();
+      // Process log loss queue
+      DtaLogLoss dataLog;
+      if (xQueueReceive(logIdLossQueue, &dataLog, 0) == pdTRUE)
+      {
+        sendLogRequest(static_cast<uint32_t>(dataLog.Logid));
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+    // esp_task_wdt_reset();
+    yield();
+  }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
 
 void setupTime()
 {
-  // Cấu hình thời gian
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
   struct tm timeinfo;
   int retry = 0;
   const int maxRetries = 5;
 
-  // Thử lấy thời gian, nếu thất bại thì gọi lại configTime và thử lại
   while (!getLocalTime(&timeinfo) && retry < maxRetries)
   {
-    Serial.println("Failed to obtain time. Retrying...");
-    delay(2000); // Chờ 2 giây
+    Serial.println("Failed to obtain time, retrying...");
+    delay(2000);
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     retry++;
   }
 
-  
-
-  if (retry == maxRetries)
+  if (retry < maxRetries)
   {
-    Serial.println("Failed to obtain time after multiple retries");
-    // Nếu muốn khởi động lại thì bỏ comment dòng sau:
-    ESP.restart();
-  }
-  else
-  {
-    setUpTime(timeSetup, timeinfo);
-    // Đồng bộ thời gian với bên KPL
-    processAllVoi(timeSetup); // Xử lý tất cả các ID vòi
-    Serial.println("Time acquired successfully:");
-    Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
-  }
-}
-
-
-/// @brief Hàm setup thiết lập các thông tin ban đầu
-void setup()
-{
-  Serial.begin(115200);
-  pinMode(OUT1, OUTPUT);
-  pinMode(OUT2, OUTPUT);
-  esp_task_wdt_init(60, true);
-  esp_task_wdt_add(NULL); // Thêm các nhiệm vụ bạn muốn giám sát, NULL để giám sát tất cả nhiệm vụ
-  // Initialize RS485
-  Serial2.begin(RS485BaudRate, SERIAL_8N1, RX_PIN, TX_PIN);
-  // Khởi động Wifi
-  WiFi.mode(WIFI_STA);
-
-  // Cấu hình MQTT server (thay thế bằng địa chỉ MQTT Broker của bạn)
-  client.setServer(mqttServer, 1883);
-  client.setCallback(mqttCallback);
-
-  // Khởi tạo Queue ban đầu
-  mqttQueue = xQueueCreate(15, sizeof(PumpLog));
-  logIdLossQueue = xQueueCreate(100, sizeof(DtaLogLoss));
-
-  // Create mutex for flash access
-  flashMutex = xSemaphoreCreateMutex();
-  // Initialize flash (SPIFFS)
-  initLittleFS();
-  readFlashSettings(flashMutex, deviceStatus, counterReset);
-  // Tính toán currentId từ kích thước file log
-  currentId = initializeCurrentId(flashMutex);
-  Serial.printf("Log read successfully for ID: %u\n", currentId);
-  Serial.println("Setup finished");
-
-  xTaskCreate(webServerTask, "webServerTask", 16384, NULL, 1, NULL);
-  delay(3000);
-
-   // Thông báo KPL ESP32 đã sẵn sàng tiến hành gởi lệnh xuống KPL để đọc dữ liệu
-  sendStartupCommand();
-  delay(3000);
-   // Thông báo KPL ESP32 đã sẵn sàng tiến hành gởi lệnh xuống KPL để đọc dữ liệu
-  sendStartupCommand();
-
-  // xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
-  xTaskCreate(runCommandRs485, "runCommandRs485", 16384, NULL, 2, &Handle_Rs485);
-
-  xTaskCreate(ConnectWifiMqtt, "connectWifiMqtt", 8192, NULL, 1, &Handle_Wifi);
-  // Cấu hình NTP
-  while (statusConnected==false)
-  {
-    vTaskDelay(100/ portTICK_PERIOD_MS);
-    esp_task_wdt_reset();
-    Serial.print(".");
-  }
-  Serial.println("Thiet lap thoi gian:");
-
-  setupTime();
-  
-  // configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-  // // In ra thời gian ban đầu
-  // struct tm timeinfo;
-  // if (!getLocalTime(&timeinfo))
-  // {
-  //   Serial.println("Failed to obtain time");
-  //   // ESP.restart();
-  // } 
-  // Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
-  // setUpTime(timeSetup, timeinfo);
-  // // Đồng bộ thời gian với bên KPL
-  // processAllVoi(timeSetup); // Xử lý tất cả các ID vòi
-  // // Thông báo KPL ESP32 đã sẵn sàng
-  // sendStartupCommand();
-
-  // // xTaskCreate(ethernetTask, "ethernetTask", 8192, NULL, 1, &ethernetTaskhandle);
-  // xTaskCreate(runCommandRs485, "runCommandRs485", 16384, NULL, 2, &Handle_Rs485);
-  xTaskCreate(mqttSendTask, "mqttSendTask", 8192, NULL, 3, &Handle_MqttSend);
-  
-}
-
-unsigned long timer = 0;
-void loop()
-{
-  // check heap
-  checkHeap();
-
-  // Kiểm tra thông tin của thiết bị cơ bản: Head memory
-  if (client.connected())
-  {
-    client.loop();
-    if (statusConnected == true)
-    {
-      // Kích hoạt lại các task cần thiết
-      if (checkTaskState(Handle_MqttSend) == eSuspended)
-      {
-        vTaskResume(Handle_MqttSend);
+    setUpTime(&timeSetup, timeinfo);
+    processAllVoi(&timeSetup);
+    Serial.println("Time synchronized successfully");
+    setSystemStatus("OK", ""); // Clear any previous time sync errors
       }
-      vTaskSuspend(Handle_Wifi);
-      statusConnected = false;
-    }
+      else
+      {
+    Serial.println("Failed to sync time");
+    setSystemStatus("WARNING", "Failed to synchronize time after " + String(maxRetries) + " attempts");
   }
-  else
+}
+
+void setupMQTTTopics()
+{
+  // Get company info
+  callAPIGetSettingsMqtt(&settings, flashMutex);
+  xTaskCreate(callAPIServerGetCompanyInfo, "getCompanyInfo", 2048, &companyInfo, 2, NULL);
+
+  // Wait for company info
+  vTaskDelay(pdMS_TO_TICKS(4000));
+
+  // Build topics
+  snprintf(fullTopic, sizeof(fullTopic), "%s%s%s", companyInfo.Mst, TopicSendData, TopicMqtt);
+  snprintf(topicStatus, sizeof(topicStatus), "%s%s%s", companyInfo.Mst, TopicStatus, TopicMqtt);
+  snprintf(topicError, sizeof(topicError), "%s%s%s", companyInfo.Mst, TopicLogError, TopicMqtt);
+  // wildcard subscribe to all device ids under Error channel
+  snprintf(topicErrorSub, sizeof(topicErrorSub), "%s%s#", companyInfo.Mst, TopicLogError);
+  // prefix for quick check in callback
+  snprintf(topicErrorPrefix, sizeof(topicErrorPrefix), "%s%s", companyInfo.Mst, TopicLogError);
+  snprintf(topicRestart, sizeof(topicRestart), "%s%s%s", companyInfo.Mst, TopicRestart, TopicMqtt);
+  snprintf(topicGetLogIdLoss, sizeof(topicGetLogIdLoss), "%s%s", companyInfo.Mst, TopicGetLogIdLoss);
+  snprintf(topicShift, sizeof(topicShift), "%s%s%s", companyInfo.Mst, TopicShift, TopicMqtt);
+  snprintf(topicChange, sizeof(topicChange), "%s%s%s", companyInfo.Mst, TopicChange, TopicMqtt);
+
+  Serial.printf("MQTT topics configured - Company ID: %s (MST: %s)\n", companyInfo.Mst, companyInfo.Mst);
+  mqttTopicsConfigured = true;
+
+  // Subscribe to topics if MQTT is connected
+  if (mqttClient.connected())
   {
-    Serial.println("Loss connect wifi");
-    if (checkTaskState(Handle_MqttSend) != eSuspended)
-    {
-      vTaskSuspend(Handle_MqttSend);
-    }
-    // Kích hoạt lại task ConnectWifiMqtt
-    if (checkTaskState(Handle_Wifi) == eSuspended && statusConnected == false)
-    {
-      vTaskResume(Handle_Wifi);
-    }
+    Serial.println("=== SUBSCRIBING TO MQTT TOPICS ===");
+    
+    bool sub1 = mqttClient.subscribe(topicErrorSub);
+    bool sub2 = mqttClient.subscribe(topicRestart);
+    bool sub3 = mqttClient.subscribe(topicGetLogIdLoss);
+    bool sub4 = mqttClient.subscribe(topicChange);
+    bool sub5 = mqttClient.subscribe(topicShift);
+
+    Serial.printf("Subscription results:\n");
+    Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
+    Serial.printf("  Restart (%s): %s\n", topicRestart, sub2 ? "SUCCESS" : "FAILED");
+    Serial.printf("  GetLogIdLoss (%s): %s\n", topicGetLogIdLoss, sub3 ? "SUCCESS" : "FAILED");
+    Serial.printf("  Change (%s): %s\n", topicChange, sub4 ? "SUCCESS" : "FAILED");
+    Serial.printf("  Shift (%s): %s\n", topicShift, sub5 ? "SUCCESS" : "FAILED");
+    
+    Serial.println("=== SUBSCRIPTION COMPLETE ===");
+      }
+      else
+      {
+    Serial.println("MQTT not connected, will subscribe when connected");
   }
-
-  esp_task_wdt_reset();
-  vTaskDelay(100 / portTICK_PERIOD_MS);
-  yield();
 }
 
-eTaskState checkTaskState(TaskHandle_t taskHandle){
-  eTaskState state = eTaskGetState(taskHandle);
-  return state;
-}
+void connectMQTT()
+{
+  Serial.println("Connecting to MQTT...");
 
-// Hàm quét WiFi và trả về HTML
-// Quét danh sách WiFi
-void scanWiFi() {
-  int networks = WiFi.scanNetworks();
-  wifiList = "[";
-  for (int i = 0; i < networks; i++) {
-      if (i > 0) wifiList += ",";
-      wifiList += "\"" + WiFi.SSID(i) + "\"";
-  }
-  wifiList += "]";
-  WiFi.scanDelete();  // Giải phóng bộ nhớ sau khi quét
-}
+  if (mqttClient.connect(TopicMqtt, mqttUser, mqttPassword))
+  {
+    Serial.println("MQTT connected");
+    statusConnected = true;
+    setSystemStatus("OK", ""); // Clear any MQTT connection errors
 
-
-// Xử lý khi người dùng gửi yêu cầu kết nối WiFi
-void connectWiFi(AsyncWebServerRequest *request) {
-  if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
-      String ssid = request->getParam("ssid", true)->value();
-      String password = request->getParam("password", true)->value();
-
-      request->send(200, "text/html", "<h3>Đang kết nối tới " + ssid + "...</h3> <a href='/'>Quay lại</a>");
+    // Subscribe to topics if they have been configured
+    if (mqttTopicsConfigured)
+    {
+      Serial.println("=== RE-SUBSCRIBING TO MQTT TOPICS AFTER RECONNECT ===");
       
-      Serial.println("Kết nối tới WiFi: " + ssid);
-      WiFi.begin(ssid.c_str(), password.c_str());
+      bool sub1 = mqttClient.subscribe(topicErrorSub);
+      bool sub2 = mqttClient.subscribe(topicRestart);
+      bool sub3 = mqttClient.subscribe(topicGetLogIdLoss);
+      bool sub4 = mqttClient.subscribe(topicChange);
+      bool sub5 = mqttClient.subscribe(topicShift);
 
-      int timeout = 15; // 15 giây timeout
-      while (WiFi.status() != WL_CONNECTED && timeout > 0) {
-          delay(1000);
-          Serial.print(".");
-          timeout--;
-      }
-
-      if (WiFi.status() == WL_CONNECTED) {
-          Serial.println("\nKết nối thành công! IP: " + WiFi.localIP().toString());
-      } else {
-          Serial.println("\nKết nối thất bại!");
-      }
-  } else {
-      request->send(400, "text/plain", "Thiếu SSID hoặc mật khẩu!");
-  }
-}
-
-// Hàm kiểm tra kết nối internet bằng cách ping đến DNS Google
-bool isConnectedToInternet() {
-  return ethClient.connect("8.8.8.8", 53);  // Kiểm tra kết nối đến Google DNS
-}
-
-// Xử lý route "/check"
-void handleCheckWiFi(AsyncWebServerRequest *request) {
-  if (isConnectedToInternet()) {
-      request->send(200, "text/html", checkInternet);
-  } else {
-    request->send(200, "text/html", checkInternetNoConnect);
-    vTaskDelay(2000/ portTICK_PERIOD_MS);
-    request->redirect("/config");
-  }
-}
-
-
-// Task chạy webserver
-// Thực hiện theo phương thức bất đồng bộ
-void webServerTask(void *parameter) {
-
-  WiFi.softAP(apSSID, AP_PASSWORD);
-  Serial.println("WiFi AP Started: " + String(apSSID));
-
-  scanWiFi();
-
-  // Cấu hình Web Server
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-      if (!isLoggedIn) {
-          request->redirect("/login");
-      } else {
-          request->redirect("/config");
-      }
-  });
-
-  // Vao trang Login
-  server.on("/login", HTTP_GET, [](AsyncWebServerRequest *request) {
-      request->send(200, "text/html", loginPage);
-  });
-
-  server.on("/login", HTTP_POST, [](AsyncWebServerRequest *request) {
-      if (request->hasParam("username", true) && request->hasParam("password", true)) {
-          String username = request->getParam("username", true)->value();
-          String password = request->getParam("password", true)->value();
-
-          if (username == adminUser && password == adminPass) {
-              isLoggedIn = true;
-              request->redirect("/config");
-          } else {
-              request->send(200, "text/html", loginFail);
-          }
-      }
-  });
-
-  server.on("/logout", HTTP_GET, [](AsyncWebServerRequest *request) {
-      isLoggedIn = false;
-      request->redirect("/login");
-  });
-
-  server.on("/check", HTTP_GET, handleCheckWiFi);  // Route kiểm tra trạng thái Wi-Fi
-
-  server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request) {
-      if (!isLoggedIn) {
-          request->redirect("/login");
-      } else {
-          request->send(200, "text/html", configPage1);
-      }
-  });
-
-  server.on("/wifi_scan", HTTP_GET, [](AsyncWebServerRequest *request) {
-      request->send(200, "application/json", wifiList);
-  });
-
-  // Xử lý lưu WiFi (có thể bổ sung)
-  server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
-      if (!isLoggedIn) {
-          request->redirect("/login");
-          return;
-      }
-      if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
-          String ssid = request->getParam("ssid", true)->value();
-          String password = request->getParam("password", true)->value();
-          String id = request->getParam("id", true)->value();
-          Serial.println("WiFi lưu: " + ssid + " - " + password + " - " + id);
-          String data = ssid + "\n" + password + "\n" + id;
-          writeFileConfig("/config.txt", data);
-          request->send(200, "text/html", result);
-          delay(2000);
-          ESP.restart();
-      }else {
-          request->send(200, "text/html", serverFail);
-        }
-  });
-
-  server.begin();
-  Serial.println("Web server đã sẵn sàng!");
-
-  vTaskDelete(NULL);
-}
-
-/// @brief hàm kết nối Wifi và Mqtt
-/// @param parameter
-void ConnectWifiMqtt(void *parameter){
-  int retryConenct = 0;
-
-  String configData = readFileConfig("/config.txt");
-  if (configData != "") {
-      // Không có dữ liệu cấu hình, bật chế độ AP
-      // Có dữ liệu cấu hình, kết nối Wi-Fi
-      int split1 = configData.indexOf('\n');
-      int split2 = configData.lastIndexOf('\n');
-
-      String ssid = configData.substring(0, split1);
-      String password = configData.substring(split1 + 1, split2);
-      String topic = configData.substring(split2 + 1);
-      Serial.printf("wifi: %s, Pass: %s, TopicMqtt: %s", ssid, password, topic);
-      // Ghi đè SSID và Password mặc định
-      strncpy(wifi_ssid, ssid.c_str(), sizeof(wifi_ssid) - 1);
-      strncpy(wifi_password, password.c_str(), sizeof(wifi_password) - 1);
-      strncpy(TopicMqtt, topic.c_str(), sizeof(TopicMqtt) - 1);
-
-      wifi_ssid[sizeof(wifi_ssid) - 1] = '\0';   // Đảm bảo chuỗi kết thúc
-      wifi_password[sizeof(wifi_password) - 1] = '\0'; // Đảm bảo chuỗi kết thúc
-      TopicMqtt[sizeof(TopicMqtt) - 1] = '\0'; // Đảm bảo chuỗi kết thúc
-  }
-  
-  while (true)
-  {
-    if (WiFi.status() != WL_CONNECTED)
-    {
-      Serial.println("Connecting to WiFi... " + retryConenct);
-      WiFi.begin(wifi_ssid, wifi_password);
-      int retryCount = 0;
-      while (WiFi.status() != WL_CONNECTED && retryCount < 30)
-      {
-        esp_task_wdt_reset();
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-        Serial.print(".");
-        retryCount++;
-      }
-      if (WiFi.status() == WL_CONNECTED)
-      {
-        Serial.println("\nWiFi connected");
-        Serial.print("IP Address: ");
-        Serial.println(WiFi.localIP());
-
-        Serial.println("get data from server Settings MQTT");
-        callAPIGetSettingsMqtt(settings, flashMutex);
-        Serial.println(settings->MqttServer);
-        Serial.println(settings->PortMqtt);
-        client.setServer(settings->MqttServer, settings->PortMqtt);
-        delay(1000);
-
-        Serial.println("get data from server Company information");
-        xTaskCreate(callAPIServerGetCompanyInfo, "getCompanyInfo", 2048, companyInfo, 2, NULL);
-        listFiles(flashMutex);
-        delay(4000);
-        // Cập nhật thông tin của các topic
-        strcpy(fullTopic, companyInfo->Mst);
-        strcpy(topicStatus, companyInfo->Mst);
-        strcpy(topicError, companyInfo->Mst);
-        strcpy(topicRestart, companyInfo->Mst);
-        strcpy(topicGetLogIdLoss, companyInfo->Mst);
-        strcpy(topicShift, companyInfo->Mst);
-        strcpy(topicChange, companyInfo->Mst);
-
-        strcat(fullTopic, TopicSendData);
-        strcat(topicStatus, TopicStatus);
-        strcat(topicError, TopicLogError);
-        strcat(topicRestart, TopicRestart);
-        strcat(topicGetLogIdLoss, TopicGetLogIdLoss);
-        // strcat(topicGetLogIdLoss, TopicGetLogIdLoss);
-        strcat(topicShift, TopicShift);
-        strcat(topicChange, TopicChange);
-
-        // Nối chuỗi thứ hai vào mảng
-        strcat(fullTopic, TopicMqtt);
-        strcat(topicStatus, TopicMqtt);
-        // strcat(topicGetLogIdLoss, TopicMqtt);
-        Serial.println(fullTopic);
-        Serial.println(topicGetLogIdLoss);
-        Serial.println(companyInfo->CompanyId);
-      }
-      else
-      {
-        Serial.println("\nWiFi connection failed, retrying...");
-        retryConenct++;
-        if (retryConenct > 20)
-        {
-          Serial.println("Max WiFi retry reached. Restarting...");
-          // Lưu log trước khi restart
-          strcpy(deviceStatus->status, "WiFi connection failed - Restarting");
-          vTaskDelay(pdMS_TO_TICKS(1000));
-          ESP.restart();
-        }
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Đợi trước khi thử lại
-        continue;
-      }
+      Serial.printf("Re-subscription results:\n");
+      Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
+      Serial.printf("  Restart (%s): %s\n", topicRestart, sub2 ? "SUCCESS" : "FAILED");
+      Serial.printf("  GetLogIdLoss (%s): %s\n", topicGetLogIdLoss, sub3 ? "SUCCESS" : "FAILED");
+      Serial.printf("  Change (%s): %s\n", topicChange, sub4 ? "SUCCESS" : "FAILED");
+      Serial.printf("  Shift (%s): %s\n", topicShift, sub5 ? "SUCCESS" : "FAILED");
+      Serial.println("=== RE-SUBSCRIPTION COMPLETE ===");
     }
-    // Kết nối MQTT
-    if (!client.connected())
-    {
-      // get data from server
-      esp_task_wdt_reset();
-      Serial.println("Connecting to MQTT...");
-      if (client.connect(TopicMqtt, mqttUser, mqttPassword))
-      {
-        Serial.println("MQTT connected");
-        client.subscribe(topicError);
-        client.subscribe(topicRestart);
-        client.subscribe(topicGetLogIdLoss);
-        client.subscribe(topicChange);
-        client.subscribe(topicShift);
-        delay(1000);
-        statusConnected = true;
-        // Thực hiện việc gọi API để lấy dữ liệu có Id bị loss
-        // Đăng ký các topic
-      }
-      else
-      {
-        Serial.println("MQTT connection failed, retrying...");
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Đợi trước khi thử lại
-      }
-    }
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Chờ trước khi kiểm tra lại kết nối
-  }
-  esp_task_wdt_reset();
-  vTaskDelete(NULL);
-}
-
-void mqttSendTask(void *parameter)
-{
-  TickType_t getTick;
-  getTick = xTaskGetTickCount();
-  String data = ""; // Dữ liệu lấy từ hàng đợi
-  PumpLog log;
-  Serial.println("Started task mqtt send");
-  // Biến đếm thời gian
-  int elapsedSeconds = 0;
-  const int interval = 300; // 300 giây = 5 phút
-    // Biến đánh dấu dữ liệu được gửi lên
-  bool dataReceived = false;
-  // esp_task_wdt_add(NULL); // Thêm task hiện tại vào giám sát watchdog
-  while (true)
-  {
-
-    // Serial.print("Vao day nha");
-    // Nhận dữ liệu từ hàng đợi
-    if (!client.connected())
-    {
-      /* code */
-      Serial.println("Not Connected Internet/ Mqtt");
-
-    }else if (xQueueReceive(mqttQueue, &log, pdMS_TO_TICKS(500)))
-    {
-      String jsondata = convertPumpLogToJson(log);
-      Serial.printf("LogCotBom: %d  -- LogData: %d\n", log.viTriLogCot, log.viTriLogData);
-
-      int retryCount = 0;         // Số lần thử lại
-      const int maxRetries = 3;  // Giới hạn số lần thử lại
-      elapsedSeconds = 0;
-      dataReceived = true; // Dữ liệu được gửi lên
-      while (retryCount < maxRetries)
-      {
-        // Thử gửi dữ liệu qua MQTT
-        if (client.publish(fullTopic, jsondata.c_str()))
-        {
-          Serial.printf("MQTT sent successfully\n");
-          break; // Thoát vòng lặp retry khi gửi thành công
         }
         else
         {
-          Serial.printf("MQTT send failed (Attempt %d/%d)\n", retryCount + 1, maxRetries);
-          retryCount++;
-          vTaskDelay(500 / portTICK_PERIOD_MS); // Đợi trước khi thử lại
-        }
-        
-      }
-
-      // Nếu vượt quá số lần thử lại, xử lý lỗi
-      if (retryCount == maxRetries)
-      {
-        Serial.println("Error: MQTT send failed after maximum retries. Discarding data.");
-      }
-      vTaskDelay(100/portTICK_PERIOD_MS);
-    }else {
-        // Không có dữ liệu, tăng thời gian đếm
-        elapsedSeconds += 1; // Tăng 1 giây cho mỗi chu kỳ
-
-        // Nếu đủ 5 phút và không có dữ liệu được gửi lên
-        if (elapsedSeconds >= interval)
-        {
-          if (!dataReceived)
-          {
-            Serial.println("Không có dữ liệu trong 5 phút, gửi lệnh xuống...");
-            sendStartupCommand();
-          }
-
-          // Reset biến đánh dấu và bộ đếm thời gian
-          dataReceived = false;
-          elapsedSeconds = 0;
-        }
-      }
-
-    // Chờ trước khi tiếp tục vòng lặp
-    vTaskDelayUntil(&getTick, 100 / portTICK_PERIOD_MS);
-    yield(); // Cho phép các tác vụ khác chạy
+    Serial.printf("MQTT connection failed. State: %d\n", mqttClient.state());
+    setSystemStatus("ERROR", "MQTT connection failed - state: " + String(mqttClient.state()));
+    vTaskDelay(pdMS_TO_TICKS(5000));
   }
 }
 
-/// @brief Hàm này đọc thông tin phản hồi về từ mqtt publicer
-/// @param topic
-/// @param payload
-/// @param length
+void sendDeviceStatus()
+{
+  // Create JSON status data
+  DynamicJsonDocument doc(1024);
+
+  doc["idDevice"] = TopicMqtt;
+  doc["companyId"] = companyInfo.Mst;
+  doc["heap"] = deviceStatus.heap;
+  doc["minFreeHeap"] = deviceStatus.free;
+  doc["temperature"] = deviceStatus.temperature;
+  doc["counterReset"] = deviceStatus.counterReset;
+  doc["ipAddress"] = WiFi.localIP().toString();
+
+  String jsonString;
+  serializeJson(doc, jsonString);
+
+  // Publish to status topic
+  if (mqttClient.publish(topicStatus, jsonString.c_str()))
+  {
+    Serial.printf("Status sent: %s\n", jsonString.c_str());
+  }
+  else
+  {
+    Serial.println("Failed to send device status");
+    setSystemStatus("ERROR", "MQTT publish failed");
+  }
+}
+
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
-  Serial.print("Message arrived on topic: ");
-  Serial.println(topic);
+  Serial.printf("=== MQTT CALLBACK TRIGGERED ===\n");
+  Serial.printf("Topic: %s\n", topic);
   if (strcmp(topic, topicRestart) == 0)
   {
-    // ESP.restart();
-    Serial.print("Restart\n");
+    Serial.println("Restart command received - restarting ESP32...");
+    ESP.restart();
   }
-  if (strcmp(topic, topicError) == 0)
+
+  // Match any 11223311A/Error/{anything} by prefix
+  if (strncmp(topic, topicErrorPrefix, strlen(topicErrorPrefix)) == 0)
   {
-    parsePayload_IdLogLoss(payload, length, receivedMessage, companyInfo);
-    // Serial.println(receivedMessage->Idvoi);
-    Serial.printf("Idvoi: %s  Mst: %s \n", receivedMessage->Idvoi, receivedMessage->CompanyId);
+    Serial.println("Error topic received - parsing payload...");
+    parsePayload_IdLogLoss(payload, length, &receivedMessage, &companyInfo);
+    Serial.printf("Parsed Idvoi: %s, Expected: %s\n", receivedMessage.Idvoi, TopicMqtt);
 
-    if (logIdLossQueue != NULL)
+    if (strcmp(receivedMessage.Idvoi, TopicMqtt) == 0)
     {
-      if (strcmp(receivedMessage->Idvoi, TopicMqtt) == 0)
-      {
-        Serial.println("Lay lai thong tin giao dich");
-        Serial.printf("NumsLog: %d\n", uxQueueMessagesWaiting(logIdLossQueue));
-
+      Serial.println("Idvoi matches - processing log loss...");
         if (uxQueueMessagesWaiting(logIdLossQueue) == 0)
         {
           TaskParams *taskParams = new TaskParams;
-          taskParams->msg = new GetIdLogLoss(*receivedMessage); // Sao chép dữ liệu
+        taskParams->msg = new GetIdLogLoss(receivedMessage);
           taskParams->logIdLossQueue = logIdLossQueue;
-          // Tạo task
-          if (xTaskCreate(callAPIServerGetLogLoss, "GetData", 40960, taskParams, 3, NULL) != pdPASS)
-          {
-            Serial.println("Failed to create task");
+
+        // Check heap before creating task
+        size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+        Serial.printf("Heap before creating API task: %u bytes\n", freeHeap);
+        
+        if (freeHeap < 20000) {
+          Serial.println("Not enough heap memory for API task");
+          delete taskParams->msg;
+          delete taskParams;
+          return;
+        }
+        
+        // Reduce stack size from 40960 to 16384
+        if (xTaskCreate(callAPIServerGetLogLoss, "GetData", 16384, taskParams, 3, NULL) != pdPASS)
+        {
+          Serial.println("Failed to create log loss task");
             delete taskParams->msg;
             delete taskParams;
           }
+        else
+        {
+          Serial.println("Log loss task created successfully");
         }
+    }
+    else
+    {
+        Serial.println("Log loss queue is not empty, skipping...");
       }
     }
     else
     {
-      Serial.println("Received message or queue is NULL.");
+      Serial.println("Idvoi does not match, ignoring message");
     }
   }
-}
-
-/// @brief Hàm đọc và xử lý tín hiệu
-/// @param param
-void runCommandRs485(void *param)
-{
-  TickType_t getTick;
-  getTick = xTaskGetTickCount();
-  byte buffer[LOG_SIZE];
-  unsigned long count = 0;
-  unsigned long lastSendTime = 0; // Biến lưu thời gian gửi lệnh cuối cùng
-  esp_task_wdt_add(NULL); // Thêm task hiện tại vào giám sát watchdog
-  while (1)
-  {
-    /* code */
-    esp_task_wdt_reset(); // Reset watchdog
-    // Đọc RS485 mỗi 10ms
-    readRs485(buffer);
-
-    if (millis() - lastSendTime >= 2000)
-    {
-      lastSendTime = millis(); // Cập nhật thời gian gửi lệnh cuối cùng
-
-      // Kiểm tra hàng đợi có log cần gửi không
-      if (uxQueueMessagesWaiting(logIdLossQueue) > 0)
-      {
-        Serial.print("NumLogsLoss: ");
-        Serial.println(uxQueueMessagesWaiting(logIdLossQueue));
-
-        DtaLogLoss dataLogId;
-        if (xQueueReceive(logIdLossQueue, &dataLogId, 0))
-        {
-          Serial.printf("Da goi lenh xuong KPL: %d\n", dataLogId.Logid);
-          sendLogRequest(dataLogId.Logid);
-        }
-      }
-    }
-
-    // Delay 10ms cho vòng lặp
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-    yield(); // Cho phép các tác vụ khác chạy
   
-  // while (true)
-  // {
-  //   count++;
-  //   esp_task_wdt_reset();
-  //   if (count % 2 == 0)
-  //   {
-  //     QueueHandle_t b = logIdLossQueue;
-  //     if (uxQueueMessagesWaiting(b) > 0)
-  //     {
-  //       Serial.print("NumLogsLoss: ");
-  //       Serial.println(uxQueueMessagesWaiting(b));
-  //       DtaLogLoss dataLogId;
-  //       if (xQueueReceive(logIdLossQueue, &dataLogId, 0))
-  //       {
-  //         Serial.printf("Da goi lenh xuong KPL: %d\n", dataLogId.Logid);
-  //         sendLogRequest(dataLogId.Logid);
-  //         vTaskDelay(100/ portTICK_PERIOD_MS);
-  //         readRs485(buffer);
-  //       }
-  //     }
-  //   }
-  //   else
-  //   {
-  //     // Serial.println("Vao doc RS485");
-  //     readRs485(buffer);
-  //   }
+  Serial.println("=== MQTT CALLBACK FINISHED ===\n");
+}
 
-  //   vTaskDelay(50 / portTICK_PERIOD_MS);
-  //   // continue;
+void sendMQTTData(const PumpLog &log)
+{
+  String jsonData = convertPumpLogToJson(log);
+
+  int retryCount = 0;
+  const int maxRetries = 3;
+  esp_task_wdt_reset();
+
+  while (retryCount < maxRetries)
+  {
+    if (mqttClient.publish(fullTopic, jsonData.c_str()))
+    {
+      Serial.println("MQTT data sent successfully");
+      break;
+    }
+    else
+    {
+      Serial.printf("MQTT send failed (Attempt %d/%d)\n", retryCount + 1, maxRetries);
+      retryCount++;
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    esp_task_wdt_reset();
+    yield();
+  }
+
+  if (retryCount == maxRetries)
+  {
+    Serial.println("ERROR: MQTT send failed after maximum retries");
+    setSystemStatus("ERROR", "MQTT send failed after " + String(maxRetries) + " retries");
   }
 }
 
-void readRs485(byte * buffer)
+void readRS485Data(byte *buffer)
 {
-  if (!Serial2 || !Serial2.availableForWrite())
+  if (!Serial2.available())
   {
-    Serial.println("Cổng Rs485 Chưa sẳn sàng\n");
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    // continue;
+    return;
   }
-  static String receivedString = ""; // Biến lưu chuỗi nhận được
-  static int counter = 0;            // Đếm số chuỗi đã xử lý
-  // Gọi hàm nhận dữ liệu
-  if (Serial2.available()>0)
+
+  if (Serial2.readBytes(buffer, LOG_SIZE) == LOG_SIZE)
   {
-    // Đọc 32 byte
-    Serial2.readBytes(buffer, LOG_SIZE);
-    // Kiểm tra checksum
+    // Validate data
     uint8_t calculatedChecksum = calculateChecksum_LogData(buffer, LOG_SIZE);
-    // Serial.print("checkSumcalculatedChecksum = " + String(calculatedChecksum)+"\n");
-    PumpLog log;
-    log.checksum = buffer[30];
-    // Serial.print("CheckSum[30] = " + String(log.checksum)+"\n");
-    // Kiểm tra điều kiện log gởi lên có đúng hay ko
-    if (calculatedChecksum == log.checksum && buffer[0] == 1 && buffer[1] == 2 && buffer[29] == 3 && buffer[31] == 4)
-    {
-      // Gán dữ liệu vào struct
-      ganLog(buffer, log);
-      // String jsondata = convertPumpLogToJson(log);
-      // Serial.printf("Len: %d\n", jsondata.length());
+    uint8_t receivedChecksum = buffer[30];
 
-      if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(300)) != pdPASS)
+    if (calculatedChecksum == receivedChecksum &&
+        buffer[0] == 1 && buffer[1] == 2 &&
+        buffer[29] == 3 && buffer[31] == 4)
+    {
+
+      // Process valid data
+    PumpLog log;
+      ganLog(buffer, log);
+      // kiểm tra mqttQueue có dữ liệu không
+      if (uxQueueMessagesWaiting(mqttQueue) > 0)
       {
-        Serial.println("Error: Failed to send JSON pointer to MQTT queue");
+        Serial.println("MQTT queue is not empty, skipping...");
+        return;
       }
-      else
+
+      if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
       {
-        Serial.println("JSON sent to queue successfully");
-        // Su dung board den IO thì ko bật cái xtasklen, còn lại thì bật lên
-        // Kiểm tra kết quả tạo task
-        if (xTaskCreate(ConnectedKPLBox, "ConnectedKPLBox", 1024, NULL, 3, NULL) != pdPASS)
-        {
-          Serial.println("Error: Failed to create ConnectedKPLBox task");
-        }
-        // Serial.println(jsondata);
+        Serial.println("Log data queued for MQTT");
+        // Trigger relay
+        xTaskCreate(ConnectedKPLBox, "ConnectedKPLBox", 1024, NULL, 3, NULL);
       }
     }
   }
-  // yield(); // Cho phép các tác vụ khác chạy
 }
 
-/// @brief
-void getInfoConnectMqtt()
-{ 
-  Serial.println("get data from server Settings MQTT");
-  callAPIGetSettingsMqtt(settings, flashMutex);
-  Serial.println(settings->MqttServer);
-  Serial.println(settings->PortMqtt);
-  client.setServer(settings->MqttServer, settings->PortMqtt);
-  delay(1000);
+// viết chương trình resend lại lệnh rs485 với id trong LogIdLossQueue để đọc giá trị lên
+// Dựa vào getLogData để resend lại lệnh rs485 với id trong LogIdLossQueue để đọc giá trị lên
+// Dựa vào sendLogRequest để resend lại lệnh rs485 với id trong LogIdLossQueue để đọc giá trị lên
 
-  Serial.println("get data from server Company information");
-  xTaskCreate(callAPIServerGetCompanyInfo, "getCompanyInfo", 2048, companyInfo, 2, NULL);
-  listFiles(flashMutex);
-  delay(4000);
-  // Cập nhật thông tin của các topic
-  strcpy(fullTopic, companyInfo->Mst);
-  strcpy(topicStatus, companyInfo->Mst);
-  strcpy(topicError, companyInfo->Mst);
-  strcpy(topicRestart, companyInfo->Mst);
-  strcpy(topicGetLogIdLoss, companyInfo->Mst);
-  strcpy(topicShift, companyInfo->Mst);
-  strcpy(topicChange, companyInfo->Mst);
 
-  strcat(fullTopic, TopicSendData);
-  strcat(topicStatus, TopicStatus);
-  strcat(topicError, TopicLogError);
-  strcat(topicRestart, TopicRestart);
-  strcat(topicGetLogIdLoss, TopicGetLogIdLoss);
-  // strcat(topicGetLogIdLoss, TopicGetLogIdLoss);
-  strcat(topicShift, TopicShift);
-  strcat(topicChange, TopicChange);
-
-  // Nối chuỗi thứ hai vào mảng
-  strcat(fullTopic, TopicMqtt);
-  strcat(topicStatus, TopicMqtt);
-  // strcat(topicGetLogIdLoss, TopicMqtt);
-
-  Serial.println(fullTopic);
-  Serial.println(topicGetLogIdLoss);
-  Serial.println(companyInfo->CompanyId);
-}
-
-// Hàm xử lý tất cả các vòi
-void processAllVoi(TimeSetup *time)
+void resendLogRequest(void *param)
 {
-  // for (int i = 0; i < numOfVoi; i++)
-  // {
-  //   uint8_t idVoi = idVoiList[i];
-    sendSetTimeCommand(time); // Gửi lệnh cho ID vòi
-    // vTaskDelay(100/ portTICK_PERIOD_MS);                      // Chờ phản hồi từ thiết bị
-    // readResponse();             // Đọc phản hồi
-    // vTaskDelay(100/ portTICK_PERIOD_MS);                      // Chờ phản hồi từ thiết bị
-  // }
-}
-void checkHeap()
-{
-  if (millis() - timer > 10000)
+  Serial.println("ResendLogRequest task started");
+  esp_task_wdt_add(NULL);
+  while (true)
   {
-    timer = millis();
-    deviceStatus->heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-    deviceStatus->stack = uxTaskGetStackHighWaterMark(NULL);
-    deviceStatus->free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-    deviceStatus->temperature = temperatureRead();
-    deviceStatus->counterReset = counterReset;
-    strcpy(deviceStatus->idDevice, TopicMqtt);
-    strcpy(deviceStatus->ipAddress, WiFi.localIP().toString().c_str());
-    // strcpy(deviceStatus->status, "Running");
-
-    JsonDocument doc;
-    doc["heap"] = deviceStatus->heap;
-    doc["stack"] = deviceStatus->stack;
-    doc["free"] = deviceStatus->free;
-    doc["temperature"] = deviceStatus->temperature;
-    doc["counterReset"] = deviceStatus->counterReset;
-    doc["idDevice"] = deviceStatus->idDevice;
-    doc["ipAddress"] = deviceStatus->ipAddress;
-    doc["status"] = deviceStatus->status;
-    String json;
-    serializeJson(doc, json);
-    client.publish(topicStatus, json.c_str());
-    // áp dụng cho board ASR
-    tone(OUT2,300,100);
-    // checkHeapIntegrity(); // Kiểm tra tính toàn vẹn của heap
+    DtaLogLoss dataLog;
+    // kiểm tra xem có dữ liệu trong logIdLossQueue không
+    if (uxQueueMessagesWaiting(logIdLossQueue) > 0) 
+    {
+      if (xQueueReceive(logIdLossQueue, &dataLog, 0) == pdTRUE)
+      {
+        Serial.println("Resending log request for ID: " + String(dataLog.Logid));
+        sendLogRequest(static_cast<uint32_t>(dataLog.Logid));
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_task_wdt_reset();
+    yield();
   }
 }
 
-// Kích hoạt lại relay để nhấn O-E để thực hiện việc in lại dữ liệu
-void ConnectedKPLBox(void * param) {
-  // ĐOạn chương trình áp dụng cho ASR
-  // tone(OUT2,1245,100);
-  // vTaskDelay(200/ portTICK_PERIOD_MS);
-
-  // ĐOạn chương trình áp dụng cho bản A2
-  digitalWrite(OUT1, HIGH); // Bật relay
-  vTaskDelay(200/ portTICK_PERIOD_MS);
-  digitalWrite(OUT2, HIGH); // Bật relay
-  vTaskDelay(200/ portTICK_PERIOD_MS);
-  
-  // không giữ trạng thái của rekay
-  digitalWrite(OUT1, LOW); // Bật relay
+void ConnectedKPLBox(void *param)
+{
+  digitalWrite(OUT1, HIGH);
+  vTaskDelay(pdMS_TO_TICKS(200));
+  digitalWrite(OUT2, HIGH);
+  vTaskDelay(pdMS_TO_TICKS(200));
+  digitalWrite(OUT1, LOW);
   digitalWrite(OUT2, LOW);
+  vTaskDelete(NULL);
+}
+
+void wifiRescanTask(void *param)
+{
+  // Perform a one-time WiFi scan and update list for config portal
+  if (wifiManager != nullptr)
+  {
+    Serial.println("[Rescan] Starting WiFi rescan...");
+    wifiManager->scanWiFi();
+    Serial.println("[Rescan] WiFi rescan completed.");
+  }
   vTaskDelete(NULL);
 }
