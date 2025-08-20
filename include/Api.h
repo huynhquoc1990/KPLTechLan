@@ -38,28 +38,29 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex)
     if (httpResponseCode > 0 && httpResponseCode == 200)
     {
       String response = http.getString();
-      DynamicJsonDocument doc(1024); // Adjust size based on expected response
+      DynamicJsonDocument doc(2048); // allow both array/object
       DeserializationError error = deserializeJson(doc, response);
 
       if (!error)
       {
-        // Parse the JSON array
-        JsonArray array = doc.as<JsonArray>();
-        if (array.size() > 0)
+        JsonObject obj;
+        if (doc.is<JsonArray>()) {
+          JsonArray array = doc.as<JsonArray>();
+          if (array.size() > 0) obj = array[0];
+        } else if (doc.is<JsonObject>()) {
+          obj = doc.as<JsonObject>();
+        }
+
+        if (!obj.isNull())
         {
-          JsonObject obj = array[0];
+          strlcpy(settings->MqttServer, obj["MqttServer"] | settingsInFlash.MqttServer, sizeof(settings->MqttServer));
+          settings->PortMqtt = obj["PortMqtt"] | settingsInFlash.PortMqtt;
 
-          // Copy CompanyId into char array
-          strlcpy(settings->MqttServer, obj["MqttServer"], sizeof(settings->MqttServer));
-          settings->PortMqtt = obj["PortMqtt"];
-
-          Serial.println("MqttServer: " + String(settings->MqttServer));
-          Serial.println("PortMqtt: " + String(settings->PortMqtt));
-          // Chuyển đổi data company qua dạng hex
+          // Serial.println("MqttServer: " + String(settings->MqttServer));
+          // Serial.println("PortMqtt: " + String(settings->PortMqtt));
           String hexString;
           convertSettingsToHex(*settings, hexString);
           Serial.println("Data hexString: " + hexString + " length: " + hexString.length());
-          // Cần đọc dữ liệu đã lưu trong file companyInfo.txt
           if (strcmp(settingsInFlash.MqttServer, settings->MqttServer) == 0 && settingsInFlash.PortMqtt == settings->PortMqtt)
           {
             Serial.println("Data Settings not new");
@@ -74,7 +75,7 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex)
         {
           strcpy(settings->MqttServer, settingsInFlash.MqttServer);
           settings->PortMqtt = settingsInFlash.PortMqtt;
-          Serial.println("No data in JSON array");
+          Serial.println("No data from API, using cached settings");
         }
       }
       else
@@ -83,6 +84,7 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex)
         settings->PortMqtt = settingsInFlash.PortMqtt;
         Serial.print("Error parsing JSON: ");
         Serial.println(error.c_str());
+        Serial.println(response);
       }
     }
     else
@@ -123,6 +125,8 @@ void callAPIServerGetCompanyInfo(void *param)
     DynamicJsonDocument doc(1024);
     doc["IdDevice"] = TopicMqtt;
 
+    Serial.println("json info: " + String(TopicMqtt));
+
     String json;
     serializeJson(doc, json);
 
@@ -132,26 +136,24 @@ void callAPIServerGetCompanyInfo(void *param)
     if (httpResponseCode > 0 && httpResponseCode == 200)
     {
       String response = http.getString();
-      DynamicJsonDocument doc(1024); // Adjust size based on expected response
+      DynamicJsonDocument doc(2048);
       DeserializationError error = deserializeJson(doc, response);
 
       if (!error)
       {
-        // Parse the JSON array
-        JsonArray array = doc.as<JsonArray>();
-        if (array.size() > 0)
+        JsonObject obj;
+        if (doc.is<JsonArray>()) {
+          JsonArray array = doc.as<JsonArray>();
+          if (array.size() > 0) obj = array[0];
+        } else if (doc.is<JsonObject>()) {
+          obj = doc.as<JsonObject>();
+        }
+
+        if (!obj.isNull())
         {
-          JsonObject obj = array[0];
-
-          // Copy CompanyId into char array
-          strlcpy(company->CompanyId, obj["CompanyId"], sizeof(company->CompanyId));
-          strlcpy(company->Mst, obj["Mst"], sizeof(company->Mst));
-
-          strlcpy(company->Product, obj["Product"], sizeof(company->Product));
-
-        //   strcpy(companyInfo->CompanyId, company->CompanyId);
-        //   strcpy(companyInfo->Mst, company->Mst);
-        //   strcpy(companyInfo->Product, company->Product);
+          strlcpy(company->CompanyId, obj["CompanyId"] | company->CompanyId, sizeof(company->CompanyId));
+          strlcpy(company->Mst, obj["Mst"] | company->Mst, sizeof(company->Mst));
+          strlcpy(company->Product, obj["Product"] | company->Product, sizeof(company->Product));
 
           Serial.println("CompanyId: " + String(company->CompanyId));
           Serial.println("Mst: " + String(company->Mst));
@@ -159,13 +161,14 @@ void callAPIServerGetCompanyInfo(void *param)
         }
         else
         {
-          Serial.println("No data in JSON array");
+          Serial.println("No company data from API");
         }
       }
       else
       {
         Serial.print("Error parsing JSON: ");
         Serial.println(error.c_str());
+        Serial.println(response);
       }
     }
     else

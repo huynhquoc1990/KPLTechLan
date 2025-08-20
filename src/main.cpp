@@ -75,7 +75,7 @@ static TaskHandle_t resendLogRequestTaskHandle = NULL;
 static WiFiClient wifiClient;
 static PubSubClient mqttClient(wifiClient);
 static AsyncWebServer webServer(80);
-WiFiManager *wifiManager = nullptr;
+WiFiManager * wifiManager = nullptr;
 
 // Reset button state
 static struct
@@ -118,25 +118,29 @@ uint8_t calculateChecksum_LogData(const uint8_t *data, size_t length);
 void ganLog(byte *buffer, PumpLog &log);
 void ConnectedKPLBox(void *param);
 void resendLogRequest(void *param);
+void blinkOutput2Connected();
+void BlinkOutput2Task(void *param);
+void readMacEsp();
 
 // ============================================================================
 // MAIN SETUP & LOOP
 // ============================================================================
 
+
+
 void setup()
 {
   Serial.begin(115200);
   Serial.println("\n=== KPL Gas Device Starting ===");
-
+  
   // Initialize system
   systemInit();
-
   // Create tasks with optimized stack sizes
   xTaskCreatePinnedToCore(rs485Task, "RS485", 8192, NULL, 3, &rs485TaskHandle, 0);
   xTaskCreatePinnedToCore(wifiTask, "WiFi", 8192, NULL, 2, &wifiTaskHandle, 1);
   xTaskCreatePinnedToCore(mqttTask, "MQTT", 8192, NULL, 2, &mqttTaskHandle, 1);
   // xTaskCreatePinnedToCore(resendLogRequest, "ResendLogRequest", 8192, NULL, 2, &resendLogRequestTaskHandle, 1);
-
+  
   Serial.println("System initialized successfully");
 }
 
@@ -151,6 +155,73 @@ void loop()
   yield();
   // Feed watchdog for loopTask explicitly
   esp_task_wdt_reset();
+}
+
+void readMacEsp()
+{
+  Serial.println("Reading Mac ESP...");
+  // read địa chỉ mac của esp
+  uint64_t chipid = ESP.getEfuseMac();
+  char macStr[18];
+  sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+          (uint8_t)(chipid >> 40), (uint8_t)(chipid >> 32), (uint8_t)(chipid >> 24),
+          (uint8_t)(chipid >> 16), (uint8_t)(chipid >> 8), (uint8_t)chipid);
+  Serial.println("Mac: " + String(macStr));
+
+  // call api để check mac có trong hệ thống hay không, sử dụng Phương thức Poss
+
+  String url = String(API_BASE_URL) + API_CHECK_MAC_ENDPOINT;
+  HTTPClient http;
+    http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  DynamicJsonDocument doc(1024);
+  doc["taikhoan"] = String(macStr);
+  doc["idchinhanh"] = String(companyInfo.Mst);
+  String jsonData;
+  serializeJson(doc, jsonData); 
+  Serial.println("jsonData get Mac: " + jsonData);
+  int httpCode = http.POST(jsonData);
+
+  // cần kiểm tra nội dung trả về nếu 'OK' thì đọc giá trị lên
+  String response = http.getString();
+  Serial.println("response: " + response);
+  // check response có chứa 'OK' không [{"IsValid":true}]
+  DynamicJsonDocument doc2(1024);  
+  DeserializationError error = deserializeJson(doc2, response);
+  Serial.println("error: " + String(error.c_str()));
+
+  if (error && httpCode != 200) {
+    Serial.println("Parse error");
+    http.end();
+    return;
+  }
+  
+  bool isValid = false;
+  if (doc2.is<JsonArray>()) {
+    JsonArray arr = doc2.as<JsonArray>();
+    if (!arr.isNull() && arr.size() > 0 && arr[0].containsKey("IsValid")) {
+      isValid = arr[0]["IsValid"].as<bool>();
+    }
+  } else if (doc2.is<JsonObject>()) {
+    JsonObject obj = doc2.as<JsonObject>();
+    if (obj.containsKey("IsValid")) {
+      isValid = obj["IsValid"].as<bool>();
+    }
+  }
+
+  http.end();
+
+  if (isValid) {
+    Serial.println("Mac is in system");
+  } else {
+    Serial.println("Mac is not in system");
+    while (true)
+    {
+      Serial.println("Mac is not in system");
+      vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+  }
+  // http.end();
 }
 
 // ============================================================================
@@ -297,11 +368,12 @@ void adjustThermals()
   if (inConfigPortal)
   {
     setCpuFrequencyMhz(80);
-    WiFi.setSleep(true);
-    WiFi.setTxPower(WIFI_POWER_MINUS_1dBm);
+    // Keep AP stable: disable modem sleep in AP mode
+    WiFi.setSleep(false);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
     if (!thermallyReduced)
     {
-      Serial.println("Thermal: CONFIG portal - CPU 80MHz, TX power -1dBm, modem sleep ON");
+      Serial.println("Thermal: CONFIG portal - CPU 80MHz, TX power 8.5dBm, modem sleep OFF");
       thermallyReduced = true;
     }
     return;
@@ -447,6 +519,7 @@ void wifiTask(void *parameter)
         Serial.println("WiFi connected successfully.");
         setupTime();
         setupMQTTTopics();
+        readMacEsp();
         statusConnected = true;
       }
       else
@@ -701,6 +774,14 @@ void sendDeviceStatus()
   doc["counterReset"] = deviceStatus.counterReset;
   doc["ipAddress"] = WiFi.localIP().toString();
 
+  uint64_t chipid = ESP.getEfuseMac();
+  char macStr[18];
+  sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+          (uint8_t)(chipid >> 40), (uint8_t)(chipid >> 32), (uint8_t)(chipid >> 24),
+          (uint8_t)(chipid >> 16), (uint8_t)(chipid >> 8), (uint8_t)chipid);
+  // Serial.println("Mac: " + String(macStr));
+  doc["macAddress"] = String(macStr);
+
   String jsonString;
   serializeJson(doc, jsonString);
 
@@ -708,6 +789,10 @@ void sendDeviceStatus()
   if (mqttClient.publish(topicStatus, jsonString.c_str()))
   {
     Serial.printf("Status sent: %s\n", jsonString.c_str());
+    // Blink OUT2 to indicate internet connectivity (only if connected)
+    if (WiFi.status() == WL_CONNECTED && mqttClient.connected()) {
+      blinkOutput2Connected();
+    }
   }
   else
   {
@@ -885,6 +970,24 @@ void ConnectedKPLBox(void *param)
   digitalWrite(OUT1, LOW);
   digitalWrite(OUT2, LOW);
   vTaskDelete(NULL);
+}
+
+void BlinkOutput2Task(void *param)
+{
+  // Two quick blinks on OUT2
+  for (int i = 0; i < 1; i++) {
+    digitalWrite(OUT2, HIGH);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    digitalWrite(OUT2, LOW);
+    vTaskDelay(pdMS_TO_TICKS(120));
+  }
+  vTaskDelete(NULL);
+}
+
+void blinkOutput2Connected()
+{
+  // Fire-and-forget non-blocking blink
+  xTaskCreate(BlinkOutput2Task, "BlinkOUT2", 1024, NULL, 1, NULL);
 }
 
 void wifiRescanTask(void *param)

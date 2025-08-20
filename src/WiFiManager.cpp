@@ -65,10 +65,11 @@ void WiFiManager::startWiFiAP() {
     vTaskDelay(pdMS_TO_TICKS(100));
 
     Serial.println("[AP] Starting Access Point...");
-    // AP only to reduce radio workload and temperature
-    WiFi.mode(WIFI_AP);
-    WiFi.setTxPower(WIFI_POWER_5dBm);
-    WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 1); // low load: channel 1, hidden=0, max 1 client
+    // Prefer AP+STA to allow scanning without dropping AP
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.setSleep(false); // keep AP stable
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 4); // channel 1, hidden=0, max 4 clients
     // Note: Adjusting AP beacon interval is not available in Arduino API
     Serial.printf("AP started: %s, IP: %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
 }
@@ -81,6 +82,11 @@ void WiFiManager::startConfigurationPortal() {
     inConfigPortal = true;
     startWiFiAP();
     scanWiFi(); // Quét một lần duy nhất ở đây
+    // Ensure AP is up after scan (redundant safety)
+    if (WiFi.getMode() != WIFI_MODE_AP) {
+        Serial.println("[AP] Safety check: AP not active, starting again...");
+        startWiFiAP();
+    }
     setupWebServer();
     Serial.println("Configuration portal is active.");
 }
@@ -88,8 +94,8 @@ void WiFiManager::startConfigurationPortal() {
 void WiFiManager::scanWiFi() {
     Serial.println("\n[SCAN] Starting WiFi scan...");
     
-    Serial.println("[SCAN] Setting WiFi mode to STA for scanning.");
-    WiFi.mode(WIFI_STA);
+    Serial.println("[SCAN] Switching to AP+STA for scanning (keep AP alive).");
+    WiFi.mode(WIFI_AP_STA);
     esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(500)); // Allow time for mode change
     
@@ -123,9 +129,13 @@ void WiFiManager::scanWiFi() {
     
     WiFi.scanDelete();
     
-    // Restore AP mode after scanning
-    Serial.println("[SCAN] Restoring AP mode...");
-    WiFi.mode(WIFI_AP);
+    // Ensure AP is configured after scanning
+    Serial.println("[SCAN] Ensuring AP is active after scan...");
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.setSleep(false);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 4);
+    Serial.printf("[SCAN] AP re-started: %s, IP: %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
     esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(100));
     
