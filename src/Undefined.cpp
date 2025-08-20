@@ -3,6 +3,22 @@
 
 void processAllVoi(TimeSetup *time)
 {
+    // print time (assuming TimeSetup has hour, minute, second fields)
+    Serial.print("Time: ");
+    Serial.print(time->gio);
+    Serial.print(":");
+    Serial.print(time->phut);
+    Serial.print(":");
+    Serial.println(time->giay);
+    Serial.print("Date: ");
+    Serial.print(time->ngay);
+    Serial.print("/");
+    Serial.print(time->thang);
+    Serial.print("/");
+    Serial.println(time->nam);
+
+    sendSetTimeCommand(time);
+
     // Dummy implementation
 }
 

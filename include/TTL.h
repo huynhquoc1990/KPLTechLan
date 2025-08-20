@@ -31,12 +31,12 @@ inline void sendLogRequest(uint16_t logPosition) {
     // Gửi toàn bộ buffer
     Serial2.write(buffer, sizeof(buffer));
     // In dữ liệu để kiểm tra
-    // Serial.println();
-    // Serial.print("Data sent: ");
-    // for (int i = 0; i < sizeof(buffer); i++) {
-    //     Serial.printf("0x%02X ", buffer[i]);
-    // }
-    // Serial.println();
+    Serial.println();
+    Serial.print("Data sent: ");
+    for (int i = 0; i < sizeof(buffer); i++) {
+        Serial.printf("0x%02X ", buffer[i]);
+    }
+    Serial.println();
 }
 
 inline void sendStartupCommand() {
@@ -108,7 +108,7 @@ inline void getLogData(String command, char *&param)
   if (param != NULL)
   {
     strcpy(param, tempdata); // Sao chép dữ liệu
-    // Serial.print("data: "); Serial.println(param);
+    Serial.print("data: "); Serial.println(tempdata);
   }
   else
   {
@@ -201,14 +201,13 @@ inline void sendSetTimeCommand(TimeSetup *time) {
     Serial2.write(buffer, 10); // Gửi 10 byte dữ liệu
     delayMicroseconds(150); // Thêm độ trễ nhỏ để đảm bảo dữ liệu được gửi đi
     
-
     // In dữ liệu lệnh để debug
-    // Serial.printf("Command Sent to ID %d: ", idVoi);
-    // for (int i = 0; i < 10; i++) {
-    //     Serial.printf("0x%02X ", buffer[i]);
-    //     // delayMicroseconds(100); // Thêm độ trễ nhỏ giữa các byte để tránh lỗi truyền
-    // }
-    // Serial.println();
+    Serial.printf("Command Sent to ID %d: ", 99);
+    for (int i = 0; i < 10; i++) {
+        Serial.printf("0x%02X ", buffer[i]);
+        delayMicroseconds(100); // Thêm độ trễ nhỏ giữa các byte để tránh lỗi truyền
+    }
+    Serial.println();
     readResponse(); // Đọc phản hồi từ thiết bị
 }
 
