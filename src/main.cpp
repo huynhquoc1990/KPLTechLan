@@ -664,9 +664,9 @@ void setupTime()
     processAllVoi(&timeSetup);
     Serial.println("Time synchronized successfully");
     setSystemStatus("OK", ""); // Clear any previous time sync errors
-      }
-      else
-      {
+  }
+  else
+  {
     Serial.println("Failed to sync time");
     setSystemStatus("WARNING", "Failed to synchronize time after " + String(maxRetries) + " attempts");
   }

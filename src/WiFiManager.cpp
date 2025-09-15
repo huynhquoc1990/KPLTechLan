@@ -34,6 +34,9 @@ bool WiFiManager::connectToWiFi() {
     WiFi.setSleep(true);                 // save power while connecting
     WiFi.setTxPower(WIFI_POWER_8_5dBm);  // moderate power
     WiFi.begin(currentConfig.ssid.c_str(), currentConfig.password.c_str());
+    WiFi.setAutoConnect(true);
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
     
     int attempts = 0;
     const int maxAttempts = 30;
