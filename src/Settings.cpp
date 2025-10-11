@@ -25,5 +25,6 @@ const char* TopicSendData = "/GetData/";
 const char* TopicStatus   = "/GetStatus/";
 const char* TopicShift    = "/Shift/";
 const char* TopicChange   = "/Change/";
+const char* TopicOTA      = "/OTA/";
 
 const uint8_t idVoiList[] = {99};

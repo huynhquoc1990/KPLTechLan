@@ -2,6 +2,7 @@
 nvs,      data, nvs,     0x9000,  0x6000,
 otadata,  data, ota,     0xf000,  0x2000,
 app0,     app,  ota_0,   0x10000, 0x180000, # Tăng kích thước app0 lên 1.5MB
+app1,     app,  ota_1,   0x190000, 0x180000, # Tăng kích thước app1 lên 1.5MB
 eeprom,   data, 0x00,    0x290000, 0x1000,
 config,   data, spiffs,  0x291000, 0x20000, # Tăng kích thước config lên 128KB
 littlefs, data, littlefs, 0x2B1000, 0x200000, # Tăng kích thước LittleFS lên 2MB

@@ -6,13 +6,13 @@
 // Include credentials từ file riêng
 #include "Credentials.h"
 // Thông số của RS485
-#define RX_PIN              16//16-ASR // 35 34  13./ bo ISOlated màu đen: 17 / bo KC868: 13
-#define TX_PIN              17 //17-ASR //32 13   5. / bo ISOlated màu đen: 16 / bo KC868: 5
+#define RX_PIN              13//16-ASR // 35 34  13./ bo ISOlated màu đen: 17 / bo KC868: 13
+#define TX_PIN              5 //17-ASR //32 13   5. / bo ISOlated màu đen: 16 / bo KC868: 5
 #define ITEM_SIZE_RS485     125
 #define RS485BaudRate       9600
 #define WIFI_TIMEOUT_MS     20000
-#define OUT1                15    // 15 bo A2
-#define OUT2                18     // 2  bo A2   , 18 Còi của bo ASR
+#define OUT1                2    // 15 bo A2
+#define OUT2                2     // 2  bo A2   , 18 Còi của bo ASR
 // #define INPUT1              36
 #define RESET_CONFIG_PIN    0     // GPIO0 - nút BOOT trên ESP32, có thể thay đổi      
 #define FLASH_DATA_FILE "/log.bin" // File lưu dữ liệu log
@@ -36,7 +36,7 @@ extern const long  gmtOffset_sec;  // Múi giờ GMT+7
 extern const int   daylightOffset_sec;
 
 
-// Cấu hình của Ethernet Lan Ethernet (LAN8720) I/O define:
+// Cấu hình của Ethernet Lan Ethernet (LAN8720) I/O define:
 #define ETH_ADDR        0
 #define ETH_POWER_PIN  -1
 #define ETH_MDC_PIN    23
@@ -45,12 +45,12 @@ extern const int   daylightOffset_sec;
 #define ETH_CLK_MODE  ETH_CLOCK_GPIO17_OUT
 
 /*
-    Các thông tin cần thay đổi khi bàn giao cho khách:
-    - TopicMqtt đây là thông tin của thiết bị.
-    - wifi_ssid: Wifi dùng để kết nối internet
-    - wifi_password: Pass wifi kết nối internet
-    - Sửa lại mảng deviceCommands tùy vào trụ cài đặc.
-    - Thay đổi số thiết bị kết nối: DeviceNumber mặc định là 5, nhưng thực tế chỉ đọc 3
+    Các thông tin cần thay đổi khi bàn giao cho khách:
+    - TopicMqtt đây là thông tin của thiết bị.
+    - wifi_ssid: Wifi dùng để kết nối internet
+    - wifi_password: Pass wifi kết nối internet
+    - Sửa lại mảng deviceCommands tùy vào trụ cài đặc.
+    - Thay đổi số thiết bị kết nối: DeviceNumber mặc định là 5, nhưng thực tế chỉ đọc 3
 */
 // char* TopicMqtt =     "QA-T01-V01";
 // char* wifi_ssid =     "Quoc Thu";   // Ctyanhthu
@@ -67,7 +67,8 @@ extern const char* TopicGetLogIdLoss;
 extern const char* TopicSendData;
 extern const char* TopicStatus;
 extern const char* TopicShift;
-extern const char* TopicChange; // Topic thay đổi trạng thái bán hàng: bán hàng/ Test bồn/ Lường  
+extern const char* TopicChange; // Topic thay đổi trạng thái bán hàng: bán hàng/ Test bồn/ Lường  
+extern const char* TopicOTA;    // Topic for OTA firmware update
 
 extern const uint8_t idVoiList[]; // Thêm các ID vòi khác tại đây
 

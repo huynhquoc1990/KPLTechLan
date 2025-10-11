@@ -412,4 +412,51 @@ inline void readFlashSettings(SemaphoreHandle_t flashMutex, DeviceStatus &device
   strcpy(deviceStatus.status, "Failed to take flash mutex");
 }
 
+/// @brief Ghi giá trị reset counter vào Flash
+/// @param flashMutex 
+/// @param counterReset 
+/// @return true nếu ghi thành công, false nếu thất bại
+inline bool writeResetCountToFlash(SemaphoreHandle_t flashMutex, unsigned long counterReset)
+{
+  if (xSemaphoreTake(flashMutex, 1000 / portTICK_PERIOD_MS) == pdTRUE)
+  {
+    if (!LittleFS.begin())
+    {
+      Serial.println("Failed to initialize LittleFS for writing counter");
+      xSemaphoreGive(flashMutex);
+      return false;
+    }
+
+    File file = LittleFS.open("/counter.bin", "w");
+    if (!file)
+    {
+      Serial.println("Failed to open counter.bin for writing");
+      LittleFS.end();
+      xSemaphoreGive(flashMutex);
+      return false;
+    }
+
+    size_t written = file.write((const uint8_t *)&counterReset, sizeof(counterReset));
+    file.close();
+    LittleFS.end();
+    xSemaphoreGive(flashMutex);
+
+    if (written == sizeof(counterReset))
+    {
+      Serial.printf("Reset counter written to flash: %lu\n", counterReset);
+      return true;
+    }
+    else
+    {
+      Serial.println("Failed to write complete counter data");
+      return false;
+    }
+  }
+  else
+  {
+    Serial.println("Failed to take flash mutex for writing counter");
+    return false;
+  }
+}
+
 #endif // STRUCTDATA_H
