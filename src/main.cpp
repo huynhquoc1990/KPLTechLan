@@ -13,6 +13,10 @@
 #include <WiFiClientSecure.h>
 #include <Update.h>
 
+// Forward declarations for OTA functions
+void performOTAUpdate(const char* firmwareURL);
+void performOTAUpdateViaAPI(const String& apiEndpoint, const String& ftpUrl);
+
 // Local includes
 #include "Settings.h"
 #include "structdata.h"
@@ -125,7 +129,8 @@ void resendLogRequest(void *param);
 void blinkOutput2Connected();
 void BlinkOutput2Task(void *param);
 void readMacEsp();
-void performOTAUpdate(const char* firmwareURL);
+// void performOTAUpdate(const char* firmwareURL);
+void performOTAUpdateViaAPI(const String& apiEndpoint, const String& ftpUrl);
 
 // ============================================================================
 // MAIN SETUP & LOOP
@@ -842,10 +847,10 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   // Handle OTA Update command
   if (strcmp(topic, topicOTA) == 0)
   {
-    Serial.println("OTA command received - parsing firmware URL...");
+    Serial.println("OTA command received - parsing payload...");
     
-    // Parse JSON payload to get firmware URL
-    DynamicJsonDocument doc(512);
+    // Parse JSON payload
+    DynamicJsonDocument doc(1024);
     DeserializationError error = deserializeJson(doc, payload, length);
     
     if (error)
@@ -855,18 +860,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       return;
     }
     
-    // Check if URL field exists
-    if (!doc.containsKey("url"))
-    {
-      Serial.println("OTA: Missing 'url' field in payload");
-      setSystemStatus("ERROR", "OTA: Missing URL field");
-      return;
-    }
-    
-    const char* firmwareURL = doc["url"];
-    Serial.printf("OTA: Firmware URL received: %s\n", firmwareURL);
-    
-    // Optionally check if this update is for this specific device
+    // Check if this update is for this specific device
     if (doc.containsKey("device"))
     {
       const char* targetDevice = doc["device"];
@@ -877,9 +871,28 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       }
     }
     
-    // Perform OTA update
-    performOTAUpdate(firmwareURL);
-    return;
+    // Method 2: API endpoint + FTP URL (current)
+    if (doc.containsKey("api") && doc.containsKey("ftpUrl"))
+    {
+      String apiEndpoint = doc["api"].as<String>();
+      String ftpUrl = doc["ftpUrl"].as<String>();
+      Serial.println("[MQTT] Received OTA command via API");
+      performOTAUpdateViaAPI(apiEndpoint, ftpUrl);
+      return;
+    }
+
+    // Method 1: Direct URL (for GitHub)
+    if (doc.containsKey("url"))
+    {
+      const char* firmwareURL = doc["url"];
+      Serial.println("[MQTT] Received OTA command via Direct URL");
+      performOTAUpdate(firmwareURL);
+      return;
+    }
+    
+    // No valid OTA method found
+    Serial.println("[MQTT ERROR] OTA payload is invalid. Expected 'url' or 'api'/'ftpUrl'.");
+    setSystemStatus("ERROR", "OTA: Invalid payload");
   }
 
   // Match any 11223311A/Error/{anything} by prefix
@@ -1079,322 +1092,289 @@ void wifiRescanTask(void *param)
 // OTA UPDATE FUNCTION
 // ============================================================================
 
+// ============================================================================
+// OTA UPDATE FROM DIRECT URL (GitHub)
+// ============================================================================
 void performOTAUpdate(const char* firmwareURL)
 {
-  Serial.println("=== STARTING OTA UPDATE ===");
-  Serial.printf("Firmware URL: %s\n", firmwareURL);
-  
-  // Check WiFi connection
+  Serial.printf("\n\n=== STARTING OTA UPDATE FROM URL ===\n");
+  Serial.printf("[OTA INFO] Firmware URL: %s\n", firmwareURL);
+  digitalWrite(OUT2, HIGH);
+
   if (WiFi.status() != WL_CONNECTED)
   {
-    Serial.println("ERROR: WiFi not connected, cannot perform OTA update");
-    setSystemStatus("ERROR", "OTA failed: No WiFi connection");
+    Serial.println("[OTA ERROR] WiFi not connected.");
+    digitalWrite(OUT2, LOW);
     return;
   }
-
-  // Check heap memory before OTA
-  size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-  Serial.printf("Free heap before OTA: %u bytes\n", freeHeap);
   
-  if (freeHeap < 50000)
-  {
-    Serial.println("ERROR: Not enough heap memory for OTA update");
-    setSystemStatus("ERROR", "OTA failed: Low memory");
-    return;
-  }
-
-  // Suspend non-critical tasks during OTA
-  Serial.println("Suspending non-critical tasks...");
-  // if (rs485TaskHandle != NULL)
-  //   vTaskSuspend(rs485TaskHandle);
-  // if (mqttTaskHandle != NULL)
-  //   vTaskSuspend(mqttTaskHandle);
-
-  // Publish OTA status
-  if (mqttClient.connected())
-  {
-    DynamicJsonDocument doc(256);
-    doc["status"] = "OTA_STARTING";
-    doc["device"] = TopicMqtt;
-    String jsonString;
-    serializeJson(doc, jsonString);
-    mqttClient.publish(topicStatus, jsonString.c_str());
-    // mqttClient.loop();
-  }
-
-  // LED indicator
-  digitalWrite(OUT2, HIGH);
-  
-  // Initialize HTTP client
   HTTPClient http;
+  WiFiClientSecure client; // GitHub requires HTTPS
+
+  client.setInsecure(); // For simplicity
+  http.begin(client, firmwareURL);
   
-  // Check if URL is HTTPS or HTTP
-  bool isHTTPS = (strncmp(firmwareURL, "https://", 8) == 0);
-  
-  if (isHTTPS)
+  // GitHub requires these headers
+  http.addHeader("User-Agent", "ESP32-OTA-Client");
+  http.addHeader("Accept", "application/octet-stream");
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // GitHub uses redirects
+  http.setTimeout(30000); // 30 seconds timeout
+
+  Serial.println("[OTA INFO] Connecting to server...");
+  int httpCode = http.GET();
+
+  if (httpCode != HTTP_CODE_OK)
   {
-    Serial.println("Using HTTPS connection (GitHub/secure server)");
-    // For HTTPS, we need to use WiFiClientSecure
-    WiFiClientSecure *client = new WiFiClientSecure;
-    if (client)
-    {
-      // Skip certificate verification (for simplicity)
-      // In production, you should add proper certificate
-      client->setInsecure();
-      http.begin(*client, firmwareURL);
-    }
-    else
-    {
-      Serial.println("Failed to create secure client");
+    Serial.printf("[OTA ERROR] HTTP GET failed. Code: %d, Error: %s\n", httpCode, http.errorToString(httpCode).c_str());
+    http.end();
+    digitalWrite(OUT2, LOW);
+    return;
+  }
+
+  int contentLength = http.getSize();
+  if (contentLength <= 0) {
+    Serial.println("[OTA ERROR] Invalid Content-Length.");
+    http.end();
+    digitalWrite(OUT2, LOW);
+    return;
+  }
+
+  Serial.printf("[OTA INFO] Firmware size: %d bytes\n", contentLength);
+
+  if (!Update.begin(contentLength))
+  {
+    Serial.printf("[OTA ERROR] Not enough space for OTA. Error: %s\n", Update.errorString());
+    http.end();
+    digitalWrite(OUT2, LOW);
+    return;
+  }
+
+  Serial.println("[OTA INFO] Starting firmware download and flash...");
+  size_t written = Update.writeStream(*http.getStreamPtr());
+
+  if (written != contentLength)
+  {
+    Serial.printf("[OTA ERROR] Download incomplete. Written: %d, Expected: %d\n", written, contentLength);
+    Update.abort();
+    http.end();
+    digitalWrite(OUT2, LOW);
+    return;
+  }
+
+  if (!Update.end(true))
+  {
+    Serial.printf("[OTA ERROR] Finalizing update failed. Error: %s\n", Update.errorString());
+    digitalWrite(OUT2, LOW);
+    return;
+  }
+
+  Serial.println("[OTA SUCCESS] Update successful! Restarting...");
+  delay(1000);
+  ESP.restart();
+}
+
+
+// ============================================================================
+// OTA UPDATE VIA API FUNCTION (REWRITTEN)
+// ============================================================================
+
+void performOTAUpdateViaAPI(const String& apiEndpoint, const String& ftpUrl)
+{
+  Serial.println("\n\n=== STARTING OTA UPDATE VIA API (v2) ===");
+  digitalWrite(OUT2, HIGH); // Turn on OTA indicator LED
+
+  // 1. PRE-FLIGHT CHECKS
+  // ===============================================
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("[OTA ERROR] WiFi not connected.");
+    setSystemStatus("ERROR", "OTA: No WiFi");
+    digitalWrite(OUT2, LOW);
+    return;
+  }
+
+  size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  Serial.printf("[OTA INFO] Free heap before OTA: %u bytes\n", freeHeap);
+  if (freeHeap < 60000) // Need enough heap for SSL client and buffers
+  {
+    Serial.println("[OTA ERROR] Not enough heap memory for OTA update.");
+    setSystemStatus("ERROR", "OTA: Low memory");
+    digitalWrite(OUT2, LOW);
+    return;
+  }
+
+  // 2. HTTP CLIENT SETUP
+  // ===============================================
+  HTTPClient http;
+  WiFiClient *streamClient = nullptr;
+
+  if (apiEndpoint.startsWith("https://"))
+  {
+    WiFiClientSecure *secureClient = new WiFiClientSecure;
+    if (secureClient) {
+      secureClient->setInsecure(); // For simplicity. In production, consider adding root CA.
+      secureClient->setTimeout(20); // 20-second timeout for socket operations
+      streamClient = secureClient;
+      http.begin(*secureClient, apiEndpoint);
+      Serial.println("[OTA INFO] Using HTTPS connection.");
+    } else {
+      Serial.println("[OTA ERROR] Failed to create secure client.");
       digitalWrite(OUT2, LOW);
       return;
     }
   }
   else
   {
-    Serial.println("Using HTTP connection");
-    http.begin(firmwareURL);
+    WiFiClient *client = new WiFiClient;
+    streamClient = client;
+    http.begin(*client, apiEndpoint);
+    Serial.println("[OTA INFO] Using HTTP connection.");
   }
   
-  http.setTimeout(30000); // 30 seconds timeout
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // Follow redirects (important for GitHub)
-  
-  Serial.println("Connecting to firmware server...");
-  int httpCode = http.GET();
-  
+  // Set headers to mimic a browser, which is the most reliable configuration we've found
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+  http.addHeader("Accept", "application/json, text/plain, */*");
+  http.addHeader("Connection", "close");
+  http.setTimeout(60000); // 60-second timeout for the entire request
+
+  // Prepare JSON body
+  DynamicJsonDocument postDoc(1024);
+  postDoc["FtpUrl"] = ftpUrl.c_str();
+  String postBody;
+  serializeJson(postDoc, postBody);
+
+  // 3. SEND REQUEST AND CHECK RESPONSE
+  // ===============================================
+  Serial.printf("[OTA INFO] Sending POST request to %s\n", apiEndpoint.c_str());
+  Serial.printf("[OTA INFO] Body: %s\n", postBody.c_str());
+  int httpCode = http.POST(postBody);
+
   if (httpCode != HTTP_CODE_OK)
   {
-    Serial.printf("OTA FAILED: HTTP GET failed, error: %s (code: %d)\n", http.errorToString(httpCode).c_str(), httpCode);
+    Serial.printf("[OTA ERROR] API request failed. HTTP Code: %d\n", httpCode);
+    Serial.printf("[OTA ERROR] Server response: %s\n", http.getString().c_str());
+    setSystemStatus("ERROR", "OTA: API Error " + String(httpCode));
     http.end();
     digitalWrite(OUT2, LOW);
-    
-    setSystemStatus("ERROR", "OTA failed: HTTP " + String(httpCode));
-    
-    // Publish failure status
-    if (mqttClient.connected())
-    {
-      DynamicJsonDocument doc(256);
-      doc["status"] = "OTA_FAILED";
-      doc["error"] = "HTTP error: " + String(httpCode);
-      doc["device"] = TopicMqtt;
-      String jsonString;
-      serializeJson(doc, jsonString);
-      mqttClient.publish(topicStatus, jsonString.c_str());
-      mqttClient.loop();
-    }
-    
-    // Resume tasks
-    // if (rs485TaskHandle != NULL)
-    //   vTaskResume(rs485TaskHandle);
-    // if (mqttTaskHandle != NULL)
-    //   vTaskResume(mqttTaskHandle);
     return;
   }
-  
-  // Get firmware size
+
+  Serial.println("[OTA INFO] API request successful. Receiving firmware...");
+
+  // 4. BEGIN FIRMWARE UPDATE PROCESS
+  // ===============================================
   int contentLength = http.getSize();
-  Serial.printf("Firmware size: %d bytes\n", contentLength);
-  
-  if (contentLength <= 0)
+  Serial.printf("[OTA INFO] Content-Length: %d bytes\n", (contentLength == -1 ? 0 : contentLength));
+
+  bool updateStarted = false;
+  if (contentLength > 0) {
+    updateStarted = Update.begin(contentLength);
+  } else {
+    // If size is unknown, start with max size.
+    updateStarted = Update.begin(UPDATE_SIZE_UNKNOWN);
+  }
+
+  if (!updateStarted)
   {
-    Serial.println("OTA FAILED: Invalid content length");
+    Serial.printf("[OTA ERROR] Not enough space for OTA. Error: %s\n", Update.errorString());
+    setSystemStatus("ERROR", "OTA: " + String(Update.errorString()));
     http.end();
     digitalWrite(OUT2, LOW);
-    
-    setSystemStatus("ERROR", "OTA failed: Invalid firmware size");
-    
-    // Resume tasks
-    // if (rs485TaskHandle != NULL)
-    //   vTaskResume(rs485TaskHandle);
-    // if (mqttTaskHandle != NULL)
-    //   vTaskResume(mqttTaskHandle);
     return;
   }
+
+  // 5. DOWNLOAD AND FLASH LOOP
+  // ===============================================
+  Serial.println("[OTA INFO] Starting firmware download and flash...");
   
-  // Check if there's enough space
-  if (!Update.begin(contentLength))
-  {
-    Serial.printf("OTA FAILED: Not enough space. Error: %s\n", Update.errorString());
-    http.end();
-    digitalWrite(OUT2, LOW);
-    
-    setSystemStatus("ERROR", "OTA failed: " + String(Update.errorString()));
-    
-    // Resume tasks
-    // if (rs485TaskHandle != NULL)
-    //   vTaskResume(rs485TaskHandle);
-    // if (mqttTaskHandle != NULL)
-    //   vTaskResume(mqttTaskHandle);
-    return;
-  }
-  
-  Serial.println("Starting firmware download and flash...");
-  Serial.println("OTA Update started - downloading firmware...");
-  
-  // Get TCP stream
-  WiFiClient * stream = http.getStreamPtr();
-  
-  // Buffer for download
-  uint8_t buff[512] = { 0 };
+  // Disable Watchdog Timer for the update process
+  disableCore0WDT();
+  #if CONFIG_FREERTOS_UNICORE == 0
+  disableCore1WDT();
+  #endif
+
   size_t written = 0;
-  int lastPercent = -1;
+  uint8_t buff[512] = {0};
   unsigned long startTime = millis();
   
-  // Download and write firmware
-  while (http.connected() && (written < contentLength))
+  WiFiClient* stream = http.getStreamPtr();
+  while (http.connected() && (contentLength == -1 || written < contentLength))
   {
-    // Get available data size
     size_t available = stream->available();
-    
     if (available)
     {
-      // Read up to buffer size
-      size_t toRead = (available > sizeof(buff)) ? sizeof(buff) : available;
-      int c = stream->readBytes(buff, toRead);
-      
-      if (c > 0)
+      size_t len = stream->readBytes(buff, sizeof(buff));
+      if (len > 0)
       {
-        // Write to flash
-        size_t bytesWritten = Update.write(buff, c);
-        if (bytesWritten != c)
+        if (Update.write(buff, len) != len)
         {
-          Serial.printf("OTA FAILED: Write error at %d bytes (wrote %d of %d)\n", written, bytesWritten, c);
-          Update.printError(Serial);
-          break;
-        }
-        
-        written += c;
-        
-        // Print progress every 5%
-        int percent = (written * 100) / contentLength;
-        if (percent != lastPercent && percent % 5 == 0)
-        {
-          unsigned long elapsed = (millis() - startTime) / 1000;
-          float speed = (written / 1024.0) / (elapsed > 0 ? elapsed : 1);
-          Serial.printf("OTA Progress: %d%% (%d/%d bytes, %.1f KB/s)\n", 
-                        percent, written, contentLength, speed);
-          lastPercent = percent;
+          Serial.printf("[OTA ERROR] Write failed at %u bytes. Error: %s\n", written, Update.errorString());
           
-          // Feed watchdog
-          esp_task_wdt_reset();
+          // CRITICAL DIAGNOSTIC: Dump the failing buffer
+          Serial.println("--- BEGIN FAILED BUFFER DUMP (HEX) ---");
+          for(int i=0; i<len; i++) {
+            Serial.printf("%02X ", buff[i]);
+            if ((i+1) % 16 == 0) Serial.println();
+          }
+          Serial.println("\n--- END FAILED BUFFER DUMP ---");
+          
+          Update.abort();
+          goto ota_end; // Jump to cleanup code
         }
-        
-        // Feed watchdog every 10KB
-        if (written % 10240 == 0)
-        {
-          esp_task_wdt_reset();
+        written += len;
+
+        // Progress reporting
+        if (contentLength > 0) {
+            Serial.printf("[OTA PROGRESS] %d%% (%u / %d bytes)\r", (written * 100) / contentLength, written, contentLength);
+        } else {
+            Serial.printf("[OTA PROGRESS] %u bytes written\r", written);
         }
       }
     }
-    else
-    {
-      delay(10);
-    }
+    // Yield to other tasks and feed WDT
+    vTaskDelay(1); 
   }
+
+ota_end:
+  // 6. FINALIZE AND CLEANUP
+  // ===============================================
+  unsigned long duration = (millis() - startTime) / 1000;
+  Serial.printf("\n[OTA INFO] Download finished in %lu seconds. Total bytes: %u\n", duration, written);
+
+  // Re-enable Watchdog Timer
+  enableCore0WDT();
+  #if CONFIG_FREERTOS_UNICORE == 0
+  enableCore1WDT();
+  #endif
   
   http.end();
   digitalWrite(OUT2, LOW);
-  
-  Serial.printf("Download completed: %d bytes in %lu seconds\n", written, (millis() - startTime) / 1000);
-  
-  // Check if download completed
-  if (written != contentLength)
+
+  if (Update.hasError())
   {
-    Serial.printf("OTA FAILED: Download incomplete. Written: %d, Expected: %d\n", written, contentLength);
-    Update.abort();
-    
-    setSystemStatus("ERROR", "OTA failed: Incomplete download");
-    
-    // Publish failure status
-    if (mqttClient.connected())
-    {
-      DynamicJsonDocument doc(256);
-      doc["status"] = "OTA_FAILED";
-      doc["error"] = "Incomplete download";
-      doc["device"] = TopicMqtt;
-      String jsonString;
-      serializeJson(doc, jsonString);
-      mqttClient.publish(topicStatus, jsonString.c_str());
-      mqttClient.loop();
-    }
-    
-    // Resume tasks
-    // if (rs485TaskHandle != NULL)
-    //   vTaskResume(rs485TaskHandle);
-    // if (mqttTaskHandle != NULL)
-    //   vTaskResume(mqttTaskHandle);
-    return;
+    Serial.printf("[OTA ERROR] Update failed with error: %s\n", Update.errorString());
+    setSystemStatus("ERROR", "OTA: " + String(Update.errorString()));
   }
-  
-  // Finalize update
-  Serial.println("Finalizing OTA update...");
-  if (Update.end(true))
+  else if (Update.isFinished())
   {
-    Serial.println("OTA UPDATE SUCCESS!");
-    
-    if (Update.isFinished())
+    if (Update.end(true)) // true to set the new partition as bootable
     {
-      Serial.println("Update successfully completed. Restarting...");
-      
-      // Publish success status before restart
-      if (mqttClient.connected())
-      {
-        DynamicJsonDocument doc(256);
-        doc["status"] = "OTA_SUCCESS";
-        doc["device"] = TopicMqtt;
-        doc["bytes"] = written;
-        String jsonString;
-        serializeJson(doc, jsonString);
-        mqttClient.publish(topicStatus, jsonString.c_str());
-        mqttClient.loop();
-        delay(1000); // Give time for message to be sent
-      }
-      
-      // Increment reset counter
-      counterReset++;
-      writeResetCountToFlash(flashMutex, counterReset);
-      
-      // Restart device
-      delay(2000);
+      Serial.println("[OTA SUCCESS] Update successful! Restarting...");
+      delay(1000);
       ESP.restart();
     }
     else
     {
-      Serial.println("Update not finished? Something went wrong!");
-      
-      // Resume tasks
-      // if (rs485TaskHandle != NULL)
-      //   vTaskResume(rs485TaskHandle);
-      // if (mqttTaskHandle != NULL)
-      //   vTaskResume(mqttTaskHandle);
+      Serial.printf("[OTA ERROR] Finalizing update failed. Error: %s\n", Update.errorString());
+      setSystemStatus("ERROR", "OTA: Finalize failed");
     }
   }
   else
   {
-    Serial.printf("OTA FAILED: Error occurred during finalization. Error: %s\n", Update.errorString());
-    Update.printError(Serial);
-    
-    setSystemStatus("ERROR", "OTA failed: " + String(Update.errorString()));
-    
-    // Publish failure status
-    if (mqttClient.connected())
-    {
-      DynamicJsonDocument doc(256);
-      doc["status"] = "OTA_FAILED";
-      doc["error"] = Update.errorString();
-      doc["device"] = TopicMqtt;
-      String jsonString;
-      serializeJson(doc, jsonString);
-      mqttClient.publish(topicStatus, jsonString.c_str());
-      mqttClient.loop();
-    }
-    
-    // Resume tasks
-    // if (rs485TaskHandle != NULL)
-    //   vTaskResume(rs485TaskHandle);
-    // if (mqttTaskHandle != NULL)
-    //   vTaskResume(mqttTaskHandle);
+      Serial.println("[OTA ERROR] Update did not complete.");
+      setSystemStatus("ERROR", "OTA: Incomplete");
   }
   
-  Serial.println("=== OTA UPDATE PROCESS COMPLETED ===");
+  Serial.println("=== OTA UPDATE VIA API PROCESS COMPLETED ===");
 }
