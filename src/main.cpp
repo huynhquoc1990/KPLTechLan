@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <esp_task_wdt.h>
+#include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -65,12 +66,17 @@ static char topicGetLogIdLoss[64];
 static char topicShift[64];
 static char topicChange[64];
 static char topicOTA[64];             // topic for OTA firmware update
+static char topicChangePrice[64];     // topic for changing price
 
 // FreeRTOS objects
 static QueueHandle_t mqttQueue = NULL;
 static QueueHandle_t logIdLossQueue = NULL;
+static QueueHandle_t priceChangeQueue = NULL;  // Queue for price change requests
 static SemaphoreHandle_t flashMutex = NULL;
 static SemaphoreHandle_t systemMutex = NULL;
+
+// Track last sent price change request for response publishing
+static PriceChangeRequest lastPriceChangeRequest;
 
 // Task handles
 static TaskHandle_t rs485TaskHandle = NULL;
@@ -131,6 +137,7 @@ void BlinkOutput2Task(void *param);
 void readMacEsp();
 // void performOTAUpdate(const char* firmwareURL);
 void performOTAUpdateViaAPI(const String& apiEndpoint, const String& ftpUrl);
+void sendPriceChangeCommand(const PriceChangeRequest &request);
 
 // ============================================================================
 // MAIN SETUP & LOOP
@@ -143,7 +150,29 @@ unsigned long checkLogSend = 0;
 void setup()
 {
   Serial.begin(115200);
-  Serial.println("\n=== KPL Gas Device Starting ===");
+  delay(1000);
+  Serial.println("\n\n===========================================");
+  Serial.println("=== KPL Gas Device Starting ===");
+  
+  // Check reset reason
+  esp_reset_reason_t reset_reason = esp_reset_reason();
+  Serial.printf("Reset reason: %d ", reset_reason);
+  switch(reset_reason)
+  {
+    case ESP_RST_UNKNOWN:   Serial.println("(UNKNOWN)"); break;
+    case ESP_RST_POWERON:   Serial.println("(POWER ON)"); break;
+    case ESP_RST_EXT:       Serial.println("(EXTERNAL PIN)"); break;
+    case ESP_RST_SW:        Serial.println("(SOFTWARE)"); break;
+    case ESP_RST_PANIC:     Serial.println("(PANIC/EXCEPTION)"); break;
+    case ESP_RST_INT_WDT:   Serial.println("(⚠️ INTERRUPT WDT)"); break;
+    case ESP_RST_TASK_WDT:  Serial.println("(⚠️ TASK WDT TIMEOUT)"); break;
+    case ESP_RST_WDT:       Serial.println("(⚠️ OTHER WDT)"); break;
+    case ESP_RST_DEEPSLEEP: Serial.println("(DEEP SLEEP)"); break;
+    case ESP_RST_BROWNOUT:  Serial.println("(BROWNOUT)"); break;
+    case ESP_RST_SDIO:      Serial.println("(SDIO)"); break;
+    default:                Serial.println("(OTHER)"); break;
+  }
+  Serial.println("===========================================\n");
   
   // Initialize system
   systemInit();
@@ -247,9 +276,9 @@ void systemInit()
   pinMode(OUT2, OUTPUT);
   pinMode(RESET_CONFIG_PIN, INPUT_PULLUP);
 
-  // Watchdog setup
-  esp_task_wdt_init(60, true); // Increase timeout to 60s for safety during WiFi ops
-  esp_task_wdt_add(NULL);
+  // Watchdog setup - 30s timeout with panic on timeout
+  esp_task_wdt_init(30, true); // 30s timeout, true = panic and reset on timeout
+  esp_task_wdt_add(NULL); // Add setup/loop task to WDT
 
   // Initialize RS485
   Serial2.begin(RS485BaudRate, SERIAL_8N1, RX_PIN, TX_PIN);
@@ -257,10 +286,11 @@ void systemInit()
   // Initialize FreeRTOS objects
   mqttQueue = xQueueCreate(10, sizeof(PumpLog));
   logIdLossQueue = xQueueCreate(50, sizeof(DtaLogLoss));
+  priceChangeQueue = xQueueCreate(10, sizeof(PriceChangeRequest));  // Queue for price changes
   flashMutex = xSemaphoreCreateMutex();
   systemMutex = xSemaphoreCreateMutex();
 
-  if (!mqttQueue || !logIdLossQueue || !flashMutex || !systemMutex)
+  if (!mqttQueue || !logIdLossQueue || !priceChangeQueue || !flashMutex || !systemMutex)
   {
     Serial.println("ERROR: Failed to create FreeRTOS objects!");
     setSystemStatus("ERROR", "Failed to create FreeRTOS objects");
@@ -636,16 +666,45 @@ void rs485Task(void *parameter)
 {
   Serial.println("RS485 task started");
 
+  // Wait for system to stabilize before processing RS485 data
+  Serial.println("[RS485] Waiting 3 seconds for system stabilization...");
+  vTaskDelay(pdMS_TO_TICKS(3000));
+  
+  // Clear any buffered data from TTL boot sequence
+  Serial.println("[RS485] Clearing boot buffer...");
+  while (Serial2.available())
+  {
+    Serial2.read();
+  }
+  Serial.println("[RS485] Buffer cleared, ready to process data");
+
   byte buffer[LOG_SIZE];
   unsigned long lastSendTime = 0;
-  // esp_task_wdt_add(NULL);
+  unsigned long lastPriceChangeTime = 0;
+  esp_task_wdt_add(NULL); // Add this task to WDT monitoring
   
   while (true)
   {
-    // Read RS485 data
+    // Feed watchdog at start of each cycle
+    esp_task_wdt_reset();
+    
+    // Read RS485 data with error protection
     readRS485Data(buffer);
 
-    // Send log requests every 2 seconds (reduce heat/power)
+    // Priority 1: Process price change queue (one request per cycle, every 300ms)
+    if (millis() - lastPriceChangeTime >= 300)
+    {
+      lastPriceChangeTime = millis();
+      PriceChangeRequest priceRequest;
+      if (xQueueReceive(priceChangeQueue, &priceRequest, 0) == pdTRUE)
+      {
+        Serial.printf("[RS485] Processing price change request for DeviceID=%d (Queue size: %d)\n", 
+                      priceRequest.deviceId, uxQueueMessagesWaiting(priceChangeQueue));
+        sendPriceChangeCommand(priceRequest);
+      }
+    }
+
+    // Priority 2: Send log requests every 500ms (reduce heat/power)
     if (millis() - lastSendTime >= 500)
     {
       lastSendTime = millis();
@@ -659,7 +718,6 @@ void rs485Task(void *parameter)
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));
-    // esp_task_wdt_reset();
     yield();
   }
 }
@@ -720,6 +778,7 @@ void setupMQTTTopics()
   snprintf(topicShift, sizeof(topicShift), "%s%s%s", companyInfo.Mst, TopicShift, TopicMqtt);
   snprintf(topicChange, sizeof(topicChange), "%s%s%s", companyInfo.Mst, TopicChange, TopicMqtt);
   snprintf(topicOTA, sizeof(topicOTA), "%s/OTA/%s", companyInfo.Mst, TopicMqtt);
+  snprintf(topicChangePrice, sizeof(topicChangePrice), "%s%s%s", companyInfo.Mst, TopicChangePrice, TopicMqtt);
 
   Serial.printf("MQTT topics configured - Company ID: %s (MST: %s)\n", companyInfo.Mst, companyInfo.Mst);
   mqttTopicsConfigured = true;
@@ -735,6 +794,7 @@ void setupMQTTTopics()
     bool sub4 = mqttClient.subscribe(topicChange);
     bool sub5 = mqttClient.subscribe(topicShift);
     bool sub6 = mqttClient.subscribe(topicOTA);
+    bool sub7 = mqttClient.subscribe(topicChangePrice);
 
     Serial.printf("Subscription results:\n");
     Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
@@ -743,7 +803,7 @@ void setupMQTTTopics()
     Serial.printf("  Change (%s): %s\n", topicChange, sub4 ? "SUCCESS" : "FAILED");
     Serial.printf("  Shift (%s): %s\n", topicShift, sub5 ? "SUCCESS" : "FAILED");
     Serial.printf("  OTA (%s): %s\n", topicOTA, sub6 ? "SUCCESS" : "FAILED");
-    
+    Serial.printf("  ChangePrice (%s): %s\n", topicChangePrice, sub7 ? "SUCCESS" : "FAILED");
     Serial.println("=== SUBSCRIPTION COMPLETE ===");
       }
       else
@@ -773,6 +833,7 @@ void connectMQTT()
       bool sub4 = mqttClient.subscribe(topicChange);
       bool sub5 = mqttClient.subscribe(topicShift);
       bool sub6 = mqttClient.subscribe(topicOTA);
+      bool sub7 = mqttClient.subscribe(topicChangePrice);
 
       Serial.printf("Re-subscription results:\n");
       Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
@@ -781,6 +842,7 @@ void connectMQTT()
       Serial.printf("  Change (%s): %s\n", topicChange, sub4 ? "SUCCESS" : "FAILED");
       Serial.printf("  Shift (%s): %s\n", topicShift, sub5 ? "SUCCESS" : "FAILED");
       Serial.printf("  OTA (%s): %s\n", topicOTA, sub6 ? "SUCCESS" : "FAILED");
+      Serial.printf("  ChangePrice (%s): %s\n", topicChangePrice, sub7 ? "SUCCESS" : "FAILED");
       Serial.println("=== RE-SUBSCRIPTION COMPLETE ===");
     }
         }
@@ -945,6 +1007,130 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     }
   }
   
+  // Handle ChangePrice command
+  if (strcmp(topic, topicChangePrice) == 0)
+  {
+    Serial.printf("[MQTT] ChangePrice command received - parsing payload...\n");
+    Serial.printf("[MQTT] Current device MST: %s\n", companyInfo.Mst);
+    Serial.printf("[MQTT] Payload length: %d bytes\n", length);
+    
+    // Print raw payload for debugging
+    Serial.print("[MQTT] Raw payload: ");
+    for (size_t i = 0; i < length && i < 500; i++) {
+      Serial.print((char)payload[i]);
+    }
+    Serial.println();
+    
+    // Parse JSON array payload
+    DynamicJsonDocument doc(2048); // Increase size for array
+    DeserializationError error = deserializeJson(doc, payload, length);
+    
+    if (error)
+    {
+      Serial.printf("[MQTT] ChangePrice: JSON parse error: %s\n", error.c_str());
+      setSystemStatus("ERROR", "ChangePrice: Invalid JSON payload");
+      return;
+    }
+    
+    // Check if payload is an array
+    if (!doc.is<JsonArray>())
+    {
+      Serial.println("[MQTT] ChangePrice: Payload is not a JSON array");
+      setSystemStatus("ERROR", "ChangePrice: Expected JSON array");
+      return;
+    }
+    
+    JsonArray priceArray = doc.as<JsonArray>();
+    Serial.printf("[MQTT] ChangePrice: Received %d price entries\n", priceArray.size());
+    
+    // Parse and queue each price change request for RS485 task to process
+    int queued = 0;
+    int skipped = 0;
+    uint8_t deviceIdSequence = 11; // Start from ID 11, increment for each valid entry
+    
+    for (JsonObject entry : priceArray)
+    {
+      // Get item object
+      JsonObject item = entry["item"];
+      if (item.isNull())
+      {
+        Serial.println("[MQTT] Missing 'item' field, skipping...");
+        skipped++;
+        continue;
+      }
+      
+      const char* idChiNhanh = item["IDChiNhanh"] | "";
+      const char* idDevice = item["IdDevice"] | "";
+      
+      // Check if this is for current company (compare IDChiNhanh with MST)
+      if (strlen(idChiNhanh) > 0 && strcmp(idChiNhanh, companyInfo.Mst) != 0)
+      {
+        Serial.printf("[MQTT] Skipping - IDChiNhanh=%s doesn't match MST=%s\n", idChiNhanh, companyInfo.Mst);
+        skipped++;
+        continue;
+      }
+      
+      Serial.printf("[MQTT] Processing Entry #%d: IDChiNhanh=%s, IdDevice=%s\n", 
+                    deviceIdSequence - 10, idChiNhanh, idDevice);
+      
+      // Handle null UnitPrice
+      if (item["UnitPrice"].isNull())
+      {
+        Serial.println("[MQTT] UnitPrice is null, skipping...");
+        skipped++;
+        continue;
+      }
+      
+      float unitPrice = item["UnitPrice"] | 0.0f;
+      Serial.printf("[MQTT] UnitPrice=%.2f\n", unitPrice);
+      
+      // Assign sequential device ID (11, 12, 13, ... up to 20 max)
+      uint8_t deviceIdNum = deviceIdSequence;
+      
+      if (deviceIdNum > 20)
+      {
+        Serial.printf("[MQTT] Maximum devices reached (max 10, ID 11-20)\n");
+        skipped++;
+        continue;
+      }
+      
+      Serial.printf("[MQTT] Assigned RS485 Device ID: %d for IdDevice=%s\n", deviceIdNum, idDevice);
+      
+      // Create price change request
+      PriceChangeRequest request;
+      request.deviceId = deviceIdNum;
+      request.unitPrice = unitPrice;
+      strncpy(request.idDevice, idDevice, sizeof(request.idDevice) - 1);
+      request.idDevice[sizeof(request.idDevice) - 1] = '\0'; // Ensure null termination
+      strncpy(request.idChiNhanh, idChiNhanh, sizeof(request.idChiNhanh) - 1);
+      request.idChiNhanh[sizeof(request.idChiNhanh) - 1] = '\0'; // Ensure null termination
+      
+      // Queue the request for RS485 task to process
+      if (xQueueSend(priceChangeQueue, &request, pdMS_TO_TICKS(100)) == pdTRUE)
+      {
+        queued++;
+        Serial.printf("[MQTT] ✓ Queued price change: DeviceID=%d, Price=%.2f\n", deviceIdNum, unitPrice);
+        deviceIdSequence++; // Increment for next entry
+      }
+      else
+      {
+        skipped++;
+        Serial.printf("[MQTT] ✗ Failed to queue: Queue full for DeviceID=%d\n", deviceIdNum);
+      }
+    }
+    
+    // Send summary
+    Serial.printf("\n[MQTT] ChangePrice Summary: Queued=%d, Skipped=%d, Total=%d\n", 
+                  queued, skipped, priceArray.size());
+    Serial.printf("[MQTT] RS485 task will process %d price change(s)\n", queued);
+    
+    if (queued > 0) {
+      setSystemStatus("OK", String("Queued ") + String(queued) + " price change(s)");
+    } else {
+      setSystemStatus("WARNING", "No price changes queued");
+    }
+  }
+  
   Serial.println("=== MQTT CALLBACK FINISHED ===\n");
 }
 
@@ -986,35 +1172,227 @@ void readRS485Data(byte *buffer)
   {
     return;
   }
-
-  if (Serial2.readBytes(buffer, LOG_SIZE) == LOG_SIZE)
+  
+  // Limit processing to prevent overflow from TTL boot spam
+  static unsigned long lastReadTime = 0;
+  static int consecutiveReads = 0;
+  unsigned long now = millis();
+  
+  if (now - lastReadTime < 50)
   {
-    // Validate data
-    uint8_t calculatedChecksum = calculateChecksum_LogData(buffer, LOG_SIZE);
-    uint8_t receivedChecksum = buffer[30];
-
-    if (calculatedChecksum == receivedChecksum &&
-        buffer[0] == 1 && buffer[1] == 2 &&
-        buffer[29] == 3 && buffer[31] == 4)
+    consecutiveReads++;
+    if (consecutiveReads > 20)
     {
-
-      // Process valid data
-    PumpLog log;
-      ganLog(buffer, log);
-      // kiểm tra mqttQueue có dữ liệu không
-      if (uxQueueMessagesWaiting(mqttQueue) > 0)
+      Serial.println("[RS485 READ] ⚠️ Too many consecutive reads, clearing buffer to prevent overflow");
+      while (Serial2.available())
       {
-        Serial.println("MQTT queue is not empty, skipping...");
-        return;
+        Serial2.read();
       }
+      consecutiveReads = 0;
+      return;
+    }
+  }
+  else
+  {
+    consecutiveReads = 0;
+  }
+  lastReadTime = now;
 
-      if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
+  // Peek first byte to determine message type
+  int firstByte = Serial2.peek();
+  
+  // Case 0: Echo of sent command - Format: [9][ID][...] (10 bytes) - DISCARD IT
+  if (firstByte == 9 && Serial2.available() >= 10)
+  {
+    uint8_t echoBuffer[10];
+    Serial2.readBytes(echoBuffer, 10);
+    Serial.printf("[RS485 READ] Discarding echo: [0x%02X][0x%02X]...\n", echoBuffer[0], echoBuffer[1]);
+    return;
+  }
+  
+  // Case 1: Price Change Response - Format: [7][ID][S/E][8] (4 bytes)
+  if (firstByte == 7 && Serial2.available() >= 4)
+  {
+    uint8_t priceResponse[4];
+    if (Serial2.readBytes(priceResponse, 4) == 4)
+    {
+      // Validate format: [7][ID][Status][8]
+      if (priceResponse[0] == 7 && priceResponse[3] == 8)
       {
-        Serial.println("Log data queued for MQTT");
-        // Trigger relay
-        xTaskCreate(ConnectedKPLBox, "ConnectedKPLBox", 1024, NULL, 3, NULL);
+        uint8_t deviceId = priceResponse[1];
+        char status = priceResponse[2];
+        
+        Serial.printf("\n[RS485 READ] Price Change Response: ");
+        for (int i = 0; i < 4; i++) {
+          if (i == 2) {
+            Serial.printf("'%c'(0x%02X) ", priceResponse[i], priceResponse[i]);
+          } else {
+            Serial.printf("0x%02X ", priceResponse[i]);
+          }
+        }
+        Serial.println();
+        
+        // Parse status
+        if (status == 'S')
+        {
+          Serial.printf("[RS485 READ] ✓ SUCCESS - DeviceID=%d price updated successfully\n", deviceId);
+          
+          // Publish Complete response to MQTT
+          if (mqttClient.connected() && deviceId == lastPriceChangeRequest.deviceId)
+          {
+            // Build response topic: IDChiNhanh/ChangePrice
+            char responseTopic[100];
+            snprintf(responseTopic, sizeof(responseTopic), "%s/ChangePrice", lastPriceChangeRequest.idChiNhanh);
+            
+            // Build JSON response
+            DynamicJsonDocument doc(512);
+            JsonArray array = doc.to<JsonArray>();
+            JsonObject entry = array.createNestedObject();
+            entry["Key"] = "Complete";
+            
+            JsonObject item = entry.createNestedObject("item");
+            item["IDChiNhanh"] = lastPriceChangeRequest.idChiNhanh;
+            item["IdDevice"] = lastPriceChangeRequest.idDevice;
+            item["UnitPrice"] = lastPriceChangeRequest.unitPrice;
+            
+            String jsonString;
+            serializeJson(doc, jsonString);
+            
+            if (mqttClient.publish(responseTopic, jsonString.c_str()))
+            {
+              Serial.printf("[RS485 READ] ✓ Published Complete to %s: %s\n", responseTopic, jsonString.c_str());
+            }
+            else
+            {
+              Serial.printf("[RS485 READ] ✗ Failed to publish Complete to %s\n", responseTopic);
+            }
+          }
+        }
+        else if (status == 'E')
+        {
+          Serial.printf("[RS485 READ] ✗ ERROR - DeviceID=%d rejected price update (KPL returned 'E')\n", deviceId);
+          
+          // Publish Error response to MQTT
+          if (mqttClient.connected() && deviceId == lastPriceChangeRequest.deviceId)
+          {
+            char responseTopic[100];
+            snprintf(responseTopic, sizeof(responseTopic), "%s/ChangePrice", lastPriceChangeRequest.idChiNhanh);
+            
+            DynamicJsonDocument doc(512);
+            JsonArray array = doc.to<JsonArray>();
+            JsonObject entry = array.createNestedObject();
+            entry["Key"] = "Error";
+            
+            JsonObject item = entry.createNestedObject("item");
+            item["IDChiNhanh"] = lastPriceChangeRequest.idChiNhanh;
+            item["IdDevice"] = lastPriceChangeRequest.idDevice;
+            item["UnitPrice"] = lastPriceChangeRequest.unitPrice;
+            
+            String jsonString;
+            serializeJson(doc, jsonString);
+            
+            if (mqttClient.publish(responseTopic, jsonString.c_str()))
+            {
+              Serial.printf("[RS485 READ] ✓ Published Error to %s: %s\n", responseTopic, jsonString.c_str());
+            }
+            else
+            {
+              Serial.printf("[RS485 READ] ✗ Failed to publish Error to %s\n", responseTopic);
+            }
+          }
+        }
+        else
+        {
+          Serial.printf("[RS485 READ] ✗ UNKNOWN STATUS - DeviceID=%d, Status='%c' (0x%02X)\n", 
+                        deviceId, status, status);
+        }
+      }
+      else
+      {
+        Serial.printf("[RS485 READ] Invalid price response format: [0x%02X][0x%02X][0x%02X][0x%02X]\n",
+                      priceResponse[0], priceResponse[1], priceResponse[2], priceResponse[3]);
       }
     }
+    return;
+  }
+  
+  // Case 2: Pump Log Data - Format: [1][2]...[3][checksum][4] (32 bytes)
+  if (firstByte == 1 && Serial2.available() >= LOG_SIZE)
+  {
+    // Set timeout for reading to prevent blocking
+    unsigned long readStartTime = millis();
+    size_t bytesRead = Serial2.readBytes(buffer, LOG_SIZE);
+    unsigned long readDuration = millis() - readStartTime;
+    
+    if (readDuration > 1000)
+    {
+      Serial.printf("[RS485 READ] ⚠️ Read timeout: %lu ms for %d bytes\n", readDuration, bytesRead);
+      return;
+    }
+    
+    if (bytesRead == LOG_SIZE)
+    {
+      // Validate data
+      uint8_t calculatedChecksum = calculateChecksum_LogData(buffer, LOG_SIZE);
+      uint8_t receivedChecksum = buffer[30];
+
+      if (calculatedChecksum == receivedChecksum &&
+          buffer[0] == 1 && buffer[1] == 2 &&
+          buffer[29] == 3 && buffer[31] == 4)
+      {
+        // Process valid pump log data
+        PumpLog log;
+        ganLog(buffer, log);
+        
+        // kiểm tra mqttQueue có dữ liệu không
+        if (uxQueueMessagesWaiting(mqttQueue) > 0)
+        {
+          Serial.println("MQTT queue is not empty, skipping...");
+          return;
+        }
+
+        if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
+        {
+          Serial.println("Log data queued for MQTT");
+          // Trigger relay
+          xTaskCreate(ConnectedKPLBox, "ConnectedKPLBox", 1024, NULL, 3, NULL);
+        }
+      }
+      else
+      {
+        Serial.println("[RS485 READ] Invalid pump log: checksum or format error");
+      }
+    }
+    else
+    {
+      Serial.printf("[RS485 READ] ⚠️ Incomplete read: expected %d bytes, got %d\n", LOG_SIZE, bytesRead);
+    }
+    return;
+  }
+  
+  // Case 3: Unknown or incomplete data - wait for more data or clear buffer
+  if (Serial2.available() > 0 && Serial2.available() < 4)
+  {
+    // Not enough data yet, wait for next iteration
+    return;
+  }
+  
+  // Case 4: Buffer overflow protection - if buffer is suspiciously full, clear it
+  if (Serial2.available() > 100)
+  {
+    Serial.printf("[RS485 READ] ⚠️ Buffer overflow detected (%d bytes), clearing...\n", Serial2.available());
+    while (Serial2.available())
+    {
+      Serial2.read();
+    }
+    return;
+  }
+  
+  // Case 5: Invalid first byte - clear one byte and try again
+  if (firstByte != 1 && firstByte != 7 && firstByte != 9)
+  {
+    Serial.printf("[RS485 READ] Unknown first byte: 0x%02X, discarding...\n", firstByte);
+    Serial2.read(); // Discard invalid byte
   }
 }
 
@@ -1043,6 +1421,58 @@ void resendLogRequest(void *param)
     esp_task_wdt_reset();
     yield();
   }
+}
+
+void sendPriceChangeCommand(const PriceChangeRequest &request)
+{
+  // Save request for response publishing
+  lastPriceChangeRequest = request;
+  
+  Serial.printf("\n[PRICE CHANGE] Sending command: DeviceID=%d, IdDevice=%s, IDChiNhanh=%s, Price=%.2f\n", 
+                request.deviceId, request.idDevice, request.idChiNhanh, request.unitPrice);
+  
+  // Convert price to 6-digit ASCII string (Char 0-5)
+  // Format as integer with leading zeros (6 digits for Char 0-5)
+  char priceStr[7];
+  snprintf(priceStr, sizeof(priceStr), "%06d", (int)request.unitPrice);
+  
+  // Build buffer according to protocol (10 bytes total)
+  // Protocol: [PM(9)] [ID_Device] [Price_Char0-5 (6 bytes)] [Checksum] [LF(10)]
+  uint8_t buffer[10];
+  buffer[0] = 9;                 // PM command (Dec 9)
+  buffer[1] = request.deviceId;  // ID Device (11-20)
+  buffer[2] = priceStr[0];       // Đơn giá Char(0) - ASCII
+  buffer[3] = priceStr[1];       // Đơn giá Char(1) - ASCII
+  buffer[4] = priceStr[2];       // Đơn giá Char(2) - ASCII
+  buffer[5] = priceStr[3];       // Đơn giá Char(3) - ASCII
+  buffer[6] = priceStr[4];       // Đơn giá Char(4) - ASCII
+  buffer[7] = priceStr[5];       // Đơn giá Char(5) - ASCII
+  
+  // Calculate checksum: 0x5A XOR all data bytes (ID + Price chars)
+  uint8_t checksum = 0x5A ^ buffer[1] ^ buffer[2] ^ buffer[3] ^ buffer[4] ^ buffer[5] ^ buffer[6] ^ buffer[7];
+  buffer[8] = checksum;          // Char(Cksum)
+  buffer[9] = 10;                // End byte (Dec 10 = LF)
+  
+  // Send via RS485 (Serial2)
+  Serial2.write(buffer, sizeof(buffer));
+  Serial2.flush(); // Wait for transmission to complete
+  
+  Serial.printf("[PRICE CHANGE] ✓ Command sent to KPL: DeviceID=%d, Price=%.2f -> ASCII: %s\n", 
+                request.deviceId, request.unitPrice, priceStr);
+  Serial.print("[PRICE CHANGE] Data (HEX): ");
+  for (int i = 0; i < sizeof(buffer); i++) {
+    Serial.printf("0x%02X ", buffer[i]);
+  }
+  Serial.print("\n[PRICE CHANGE] Data (ASCII): ");
+  for (int i = 0; i < sizeof(buffer); i++) {
+    if (i >= 2 && i <= 7) {
+      Serial.printf("'%c' ", buffer[i]);
+    } else {
+      Serial.printf("0x%02X ", buffer[i]);
+    }
+  }
+  Serial.println();
+  Serial.println("[PRICE CHANGE] Response will be handled by readRS485Data()");
 }
 
 void ConnectedKPLBox(void *param)
@@ -1150,7 +1580,81 @@ void performOTAUpdate(const char* firmwareURL)
   }
 
   Serial.println("[OTA INFO] Starting firmware download and flash...");
-  size_t written = Update.writeStream(*http.getStreamPtr());
+  
+  // Publish OTA started status
+  if (mqttClient.connected())
+  {
+    DynamicJsonDocument doc(256);
+    doc["status"] = "OTA_DOWNLOADING";
+    doc["progress"] = 0;
+    doc["device"] = TopicMqtt;
+    String jsonString;
+    serializeJson(doc, jsonString);
+    mqttClient.publish(topicStatus, jsonString.c_str());
+    mqttClient.loop();
+  }
+  
+  // Download with progress tracking
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t buff[512];
+  size_t written = 0;
+  int lastPercent = -1;
+  
+  while (http.connected() && written < contentLength)
+  {
+    size_t available = stream->available();
+    if (available)
+    {
+      size_t len = stream->readBytes(buff, sizeof(buff));
+      if (len > 0)
+      {
+        if (Update.write(buff, len) != len)
+        {
+          Serial.println("[OTA ERROR] Write failed during download");
+          Update.abort();
+          http.end();
+          digitalWrite(OUT2, LOW);
+          
+          // Publish failure
+          if (mqttClient.connected())
+          {
+            DynamicJsonDocument doc(256);
+            doc["status"] = "OTA_FAILED";
+            doc["error"] = "Write failed";
+            doc["device"] = TopicMqtt;
+            String jsonString;
+            serializeJson(doc, jsonString);
+            mqttClient.publish(topicStatus, jsonString.c_str());
+            mqttClient.loop();
+          }
+          return;
+        }
+        written += len;
+        
+        // Report progress every 5%
+        int percent = (written * 100) / contentLength;
+        if (percent != lastPercent && percent % 5 == 0)
+        {
+          Serial.printf("[OTA PROGRESS] %d%% (%u / %d bytes)\n", percent, written, contentLength);
+          lastPercent = percent;
+          
+          // Publish progress to MQTT
+          if (mqttClient.connected())
+          {
+            DynamicJsonDocument doc(256);
+            doc["status"] = "OTA_DOWNLOADING";
+            doc["progress"] = percent;
+            doc["device"] = TopicMqtt;
+            String jsonString;
+            serializeJson(doc, jsonString);
+            mqttClient.publish(topicStatus, jsonString.c_str());
+            mqttClient.loop();
+          }
+        }
+      }
+    }
+    delay(1);
+  }
 
   if (written != contentLength)
   {
@@ -1158,6 +1662,19 @@ void performOTAUpdate(const char* firmwareURL)
     Update.abort();
     http.end();
     digitalWrite(OUT2, LOW);
+    
+    // Publish failure
+    if (mqttClient.connected())
+    {
+      DynamicJsonDocument doc(256);
+      doc["status"] = "OTA_FAILED";
+      doc["error"] = "Incomplete download";
+      doc["device"] = TopicMqtt;
+      String jsonString;
+      serializeJson(doc, jsonString);
+      mqttClient.publish(topicStatus, jsonString.c_str());
+      mqttClient.loop();
+    }
     return;
   }
 
@@ -1165,10 +1682,37 @@ void performOTAUpdate(const char* firmwareURL)
   {
     Serial.printf("[OTA ERROR] Finalizing update failed. Error: %s\n", Update.errorString());
     digitalWrite(OUT2, LOW);
+    
+    // Publish failure
+    if (mqttClient.connected())
+    {
+      DynamicJsonDocument doc(256);
+      doc["status"] = "OTA_FAILED";
+      doc["error"] = Update.errorString();
+      doc["device"] = TopicMqtt;
+      String jsonString;
+      serializeJson(doc, jsonString);
+      mqttClient.publish(topicStatus, jsonString.c_str());
+      mqttClient.loop();
+    }
     return;
   }
 
   Serial.println("[OTA SUCCESS] Update successful! Restarting...");
+  
+  // Publish 100% complete before restart
+  if (mqttClient.connected())
+  {
+    DynamicJsonDocument doc(256);
+    doc["status"] = "OTA_SUCCESS";
+    doc["progress"] = 100;
+    doc["device"] = TopicMqtt;
+    String jsonString;
+    serializeJson(doc, jsonString);
+    mqttClient.publish(topicStatus, jsonString.c_str());
+    mqttClient.loop();
+  }
+  
   delay(1000);
   ESP.restart();
 }
@@ -1297,6 +1841,7 @@ void performOTAUpdateViaAPI(const String& apiEndpoint, const String& ftpUrl)
   size_t written = 0;
   uint8_t buff[512] = {0};
   unsigned long startTime = millis();
+  int lastPercent = -1; // Track progress percentage
   
   WiFiClient* stream = http.getStreamPtr();
   while (http.connected() && (contentLength == -1 || written < contentLength))
@@ -1326,9 +1871,43 @@ void performOTAUpdateViaAPI(const String& apiEndpoint, const String& ftpUrl)
 
         // Progress reporting
         if (contentLength > 0) {
-            Serial.printf("[OTA PROGRESS] %d%% (%u / %d bytes)\r", (written * 100) / contentLength, written, contentLength);
+            int percent = (written * 100) / contentLength;
+            if (percent != lastPercent && percent % 5 == 0)
+            {
+              Serial.printf("[OTA PROGRESS] %d%% (%u / %d bytes)\n", percent, written, contentLength);
+              lastPercent = percent;
+              
+              // Publish progress to MQTT
+              if (mqttClient.connected())
+              {
+                DynamicJsonDocument doc(256);
+                doc["status"] = "OTA_DOWNLOADING";
+                doc["progress"] = percent;
+                doc["device"] = TopicMqtt;
+                String jsonString;
+                serializeJson(doc, jsonString);
+                mqttClient.publish(topicStatus, jsonString.c_str());
+                mqttClient.loop();
+              }
+            }
         } else {
-            Serial.printf("[OTA PROGRESS] %u bytes written\r", written);
+            // Unknown size, report every 50KB
+            if (written % 51200 == 0) {
+              Serial.printf("[OTA PROGRESS] %u bytes written\n", written);
+              
+              // Publish progress to MQTT
+              if (mqttClient.connected())
+              {
+                DynamicJsonDocument doc(256);
+                doc["status"] = "OTA_DOWNLOADING";
+                doc["bytes"] = written;
+                doc["device"] = TopicMqtt;
+                String jsonString;
+                serializeJson(doc, jsonString);
+                mqttClient.publish(topicStatus, jsonString.c_str());
+                mqttClient.loop();
+              }
+            }
         }
       }
     }

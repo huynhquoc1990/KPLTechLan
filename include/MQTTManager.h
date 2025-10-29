@@ -20,7 +20,7 @@ private:
     char topicGetLogIdLoss[64];
     char topicShift[64];
     char topicChange[64];
-    
+    char topicChangePrice[64];
     // Connection state
     bool m_isConnected;
     unsigned long lastReconnectAttempt;

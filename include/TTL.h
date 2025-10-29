@@ -55,6 +55,8 @@ inline void sendStartupCommand() {
 
     // Gửi toàn bộ buffer cùng lúc
     Serial2.write(buffer, sizeof(buffer));  // Gửi tất cả các byte trong buffer
+    Serial2.flush(); // Đợi cho đến khi toàn bộ dữ liệu được truyền đi
+    
 
     // In dữ liệu gửi ra Serial Monitor (dạng hex)
     Serial.println();

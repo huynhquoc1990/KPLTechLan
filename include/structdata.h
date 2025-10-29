@@ -22,6 +22,13 @@ struct TaskParams {
     QueueHandle_t logIdLossQueue;
 };
 
+// Struct for price change request
+struct PriceChangeRequest {
+    uint8_t deviceId;      // Device ID (11-20)
+    float unitPrice;       // Unit price
+    char idDevice[20];     // Original IdDevice string (TB001-TB010)
+    char idChiNhanh[20];   // IDChiNhanh for response publishing
+};
 
 struct DeviceStatus
 {
