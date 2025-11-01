@@ -27,5 +27,6 @@ const char* TopicShift    = "/Shift/";
 const char* TopicChange   = "/Change/";
 const char* TopicOTA      = "/OTA/";
 const char* TopicUpdatePrice = "/UpdatePrice";
+const char* TopicGetPrice = "/GetPrice";
 
 const uint8_t idVoiList[] = {99};

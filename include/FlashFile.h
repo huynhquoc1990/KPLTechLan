@@ -6,6 +6,11 @@
 #include "structdata.h"
 #include <freertos/semphr.h>
 #include "Inits.h"
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+// File path for storing nozzle prices
+#define NOZZLE_PRICES_FILE "/nozzle_prices.dat"
 
 // Hàm đọc thông tin từ file
 inline String readFileConfig(const char* path) {
@@ -457,6 +462,219 @@ inline bool writeResetCountToFlash(SemaphoreHandle_t flashMutex, unsigned long c
     Serial.println("Failed to take flash mutex for writing counter");
     return false;
   }
+}
+
+// ============================================================================
+// NOZZLE PRICE MANAGEMENT
+// ============================================================================
+
+// Calculate checksum for NozzlePrices data integrity
+inline uint8_t calculateNozzlePricesChecksum(const NozzlePrices &data) {
+    uint8_t checksum = 0x5A; // Start with magic value
+    const uint8_t *bytes = (const uint8_t*)data.nozzles;
+    for (size_t i = 0; i < sizeof(data.nozzles) + sizeof(data.lastUpdate); i++) {
+        checksum ^= bytes[i];
+    }
+    return checksum;
+}
+
+// Load nozzle prices from Flash
+inline bool loadNozzlePrices(NozzlePrices &prices, SemaphoreHandle_t flashMutex) {
+    if (xSemaphoreTake(flashMutex, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+        File file = LittleFS.open(NOZZLE_PRICES_FILE, "r");
+        if (!file) {
+            Serial.println("[FLASH] Nozzle prices file not found, initializing defaults...");
+            // Initialize with default prices (0.0) and empty IdDevice
+            for (int i = 0; i < 10; i++) {
+                memset(prices.nozzles[i].idDevice, 0, sizeof(prices.nozzles[i].idDevice));
+                snprintf(prices.nozzles[i].nozzorle, sizeof(prices.nozzles[i].nozzorle), "%d", 11 + i);
+                prices.nozzles[i].price = 0.0f;
+            }
+            prices.lastUpdate = 0;
+            prices.checksum = calculateNozzlePricesChecksum(prices);
+            xSemaphoreGive(flashMutex);
+            return false;
+        }
+        
+        size_t bytesRead = file.read((uint8_t*)&prices, sizeof(NozzlePrices));
+        file.close();
+        xSemaphoreGive(flashMutex);
+        
+        if (bytesRead != sizeof(NozzlePrices)) {
+            Serial.printf("[FLASH] ✗ Invalid nozzle prices file size: %d bytes (expected %d)\n", 
+                         bytesRead, sizeof(NozzlePrices));
+            return false;
+        }
+        
+        // Verify checksum
+        uint8_t calculatedChecksum = calculateNozzlePricesChecksum(prices);
+        if (calculatedChecksum != prices.checksum) {
+            Serial.printf("[FLASH] ✗ Nozzle prices checksum mismatch: 0x%02X != 0x%02X\n", 
+                         calculatedChecksum, prices.checksum);
+            return false;
+        }
+        
+        Serial.println("[FLASH] ✓ Nozzle prices loaded successfully");
+        return true;
+    } else {
+        Serial.println("[FLASH] ✗ Failed to take flash mutex for loading prices");
+        return false;
+    }
+}
+
+// Save nozzle prices to Flash
+inline bool saveNozzlePrices(const NozzlePrices &prices, SemaphoreHandle_t flashMutex) {
+    if (xSemaphoreTake(flashMutex, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+        File file = LittleFS.open(NOZZLE_PRICES_FILE, "w");
+        if (!file) {
+            Serial.println("[FLASH] ✗ Failed to open nozzle prices file for writing");
+            xSemaphoreGive(flashMutex);
+            return false;
+        }
+        
+        size_t bytesWritten = file.write((const uint8_t*)&prices, sizeof(NozzlePrices));
+        file.close();
+        xSemaphoreGive(flashMutex);
+        
+        if (bytesWritten != sizeof(NozzlePrices)) {
+            Serial.printf("[FLASH] ✗ Failed to write complete nozzle prices: %d/%d bytes\n", 
+                         bytesWritten, sizeof(NozzlePrices));
+            return false;
+        }
+        
+        Serial.println("[FLASH] ✓ Nozzle prices saved successfully");
+        return true;
+    } else {
+        Serial.println("[FLASH] ✗ Failed to take flash mutex for saving prices");
+        return false;
+    }
+}
+
+// Update a single nozzle price and save to Flash
+inline bool updateNozzlePrice(const char* nozzorle, const char* idDevice, float newPrice, 
+                              NozzlePrices &prices, SemaphoreHandle_t flashMutex) {
+    // Parse nozzle ID from string (e.g., "13" -> 13)
+    uint8_t nozzleId = atoi(nozzorle);
+    
+    // Validate nozzle ID (11-20)
+    if (nozzleId < 11 || nozzleId > 20) {
+        Serial.printf("[FLASH] ✗ Invalid nozzle ID: %s (must be 11-20)\n", nozzorle);
+        return false;
+    }
+    
+    // Map nozzle ID to array index (11->0, 12->1, ..., 20->9)
+    int index = nozzleId - 11;
+    
+    // Update price, IdDevice, Nozzorle, and timestamp
+    strncpy(prices.nozzles[index].idDevice, idDevice, sizeof(prices.nozzles[index].idDevice) - 1);
+    prices.nozzles[index].idDevice[sizeof(prices.nozzles[index].idDevice) - 1] = '\0';
+    
+    strncpy(prices.nozzles[index].nozzorle, nozzorle, sizeof(prices.nozzles[index].nozzorle) - 1);
+    prices.nozzles[index].nozzorle[sizeof(prices.nozzles[index].nozzorle) - 1] = '\0';
+    
+    prices.nozzles[index].price = newPrice;
+    prices.nozzles[index].updatedAt = time(NULL);  // Save timestamp when price updated
+    prices.lastUpdate = millis();
+    prices.checksum = calculateNozzlePricesChecksum(prices);
+    
+    // Save to Flash
+    bool saved = saveNozzlePrices(prices, flashMutex);
+    if (saved) {
+        Serial.printf("[FLASH] ✓ Nozzle %s (IdDevice=%s) price updated: %.2f VND\n", 
+                     nozzorle, idDevice, newPrice);
+    } else {
+        Serial.printf("[FLASH] ✗ Failed to save nozzle %s price\n", nozzorle);
+    }
+    
+    return saved;
+}
+
+// Get a single nozzle price
+inline float getNozzlePrice(uint8_t nozzleId, const NozzlePrices &prices) {
+    if (nozzleId < 11 || nozzleId > 20) {
+        Serial.printf("[FLASH] ✗ Invalid nozzle ID: %d\n", nozzleId);
+        return 0.0f;
+    }
+    return prices.nozzles[nozzleId - 11].price;
+}
+
+// Print all nozzle prices
+inline void printNozzlePrices(const NozzlePrices &prices) {
+    Serial.println("\n╔═══════════════════════════════════════════════════════════════════╗");
+    Serial.println("║                    NOZZLE PRICES (Flash)                          ║");
+    Serial.println("╠════════╦════════════════════╦═════════════════════════════════════╣");
+    Serial.println("║ Nozzle ║     IdDevice      ║           Price (VND)              ║");
+    Serial.println("╠════════╬════════════════════╬═════════════════════════════════════╣");
+    for (int i = 0; i < 10; i++) {
+        Serial.printf("║   %2d   ║ %-17s ║ %15.2f                 ║\n", 
+                     11 + i, 
+                     prices.nozzles[i].idDevice[0] ? prices.nozzles[i].idDevice : "N/A",
+                     prices.nozzles[i].price);
+    }
+    Serial.println("╠════════╩════════════════════╩═════════════════════════════════════╣");
+    Serial.printf("║ Last Update: %10lu ms                                      ║\n", prices.lastUpdate);
+    Serial.printf("║ Checksum: 0x%02X                                                    ║\n", prices.checksum);
+    Serial.println("╚═══════════════════════════════════════════════════════════════════╝\n");
+}
+
+// Publish all saved prices to MQTT on boot
+inline void publishSavedPricesToMQTT(const NozzlePrices &prices, PubSubClient &mqttClient, 
+                                      const char* companyId, const char* idChiNhanh, 
+                                      const char* topicMqtt) {
+    if (!mqttClient.connected()) {
+        Serial.println("[FLASH] ✗ MQTT not connected, cannot publish saved prices");
+        return;
+    }
+    
+    // Build response topic: {CompanyId}/FinishPrice
+    char responseTopic[100];
+    snprintf(responseTopic, sizeof(responseTopic), "%s/FinishPrice", companyId);
+    
+    Serial.println("[FLASH] Publishing saved prices to MQTT...");
+    int published = 0;
+    
+    for (int i = 0; i < 10; i++) {
+        // Skip nozzles without IdDevice (not configured yet)
+        if (prices.nozzles[i].idDevice[0] == '\0' || prices.nozzles[i].price == 0.0f) {
+            continue;
+        }
+        
+        // Build JSON response
+        DynamicJsonDocument doc(1024);
+        doc["topic"] = idChiNhanh;
+        
+        // Build clientid
+        char clientId[100];
+        snprintf(clientId, sizeof(clientId), "%s/GetStatus/%s", idChiNhanh, topicMqtt);
+        doc["clientid"] = clientId;
+        
+        // Build message array
+        JsonArray messageArray = doc.createNestedArray("message");
+        JsonObject entry = messageArray.createNestedObject();
+        entry["Key"] = "UpdatePrice";
+        
+        JsonObject item = entry.createNestedObject("item");
+        item["IDChiNhanh"] = idChiNhanh;
+        item["IdDevice"] = prices.nozzles[i].idDevice;
+        item["UnitPrice"] = prices.nozzles[i].price;
+        item["Nozzorle"] = prices.nozzles[i].nozzorle;
+        
+        String jsonString;
+        serializeJson(doc, jsonString);
+        
+        if (mqttClient.publish(responseTopic, jsonString.c_str())) {
+            Serial.printf("[FLASH] ✓ Published Nozzle %s (IdDevice=%s, Price=%.2f)\n", 
+                         prices.nozzles[i].nozzorle, prices.nozzles[i].idDevice, prices.nozzles[i].price);
+            published++;
+        } else {
+            Serial.printf("[FLASH] ✗ Failed to publish Nozzle %s\n", prices.nozzles[i].nozzorle);
+        }
+        
+        // Small delay to avoid overwhelming MQTT
+        delay(100);
+    }
+    
+    Serial.printf("[FLASH] Published %d saved prices to MQTT\n", published);
 }
 
 #endif // STRUCTDATA_H

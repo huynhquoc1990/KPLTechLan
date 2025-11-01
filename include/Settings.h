@@ -70,6 +70,7 @@ extern const char* TopicShift;
 extern const char* TopicChange; // Topic thay đổi trạng thái bán hàng: bán hàng/ Test bồn/ Lường  
 extern const char* TopicOTA;    // Topic for OTA firmware update
 extern const char* TopicUpdatePrice;
+extern const char* TopicGetPrice; // Topic to request current prices
 
 extern const uint8_t idVoiList[]; // Thêm các ID vòi khác tại đây
 

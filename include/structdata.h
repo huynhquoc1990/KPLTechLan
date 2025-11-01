@@ -30,6 +30,20 @@ struct PriceChangeRequest {
     char idChiNhanh[20];   // IDChiNhanh for response publishing
 };
 
+// Struct for storing nozzle prices in Flash (10 nozzles: 11-20)
+struct NozzlePrice {
+    char idDevice[20];     // IdDevice (e.g., "QA-T01-V01")
+    char nozzorle[4];      // Nozzorle (e.g., "11", "12", ..., "20")
+    float price;           // Unit price in VND
+    time_t updatedAt;      // Unix timestamp when price was updated
+};
+
+struct NozzlePrices {
+    NozzlePrice nozzles[10]; // 10 nozzles: index 0-9 for Nozzle 11-20
+    uint32_t lastUpdate;     // Timestamp of last update
+    uint8_t checksum;        // Simple checksum for data integrity
+};
+
 struct DeviceStatus
 {
   unsigned long memory;

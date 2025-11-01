@@ -14,6 +14,23 @@
 #include <WiFiClientSecure.h>
 #include <Update.h>
 
+// ============================================================================
+// DEBUG LOGGING MACROS
+// ============================================================================
+#ifdef DEBUG_MODE
+  #define DEBUG_PRINT(x)       Serial.print(x)
+  #define DEBUG_PRINTLN(x)     Serial.println(x)
+  #define DEBUG_PRINTF(...)    Serial.printf(__VA_ARGS__)
+#else
+  #define DEBUG_PRINT(x)       // No-op in release mode
+  #define DEBUG_PRINTLN(x)     // No-op in release mode
+  #define DEBUG_PRINTF(...)    // No-op in release mode
+#endif
+
+// Critical logs (always enabled, even in release mode)
+#define LOG_ERROR(x)           Serial.println(x)
+#define LOG_ERROR_F(...)       Serial.printf(__VA_ARGS__)
+
 // Forward declarations for OTA functions
 void performOTAUpdate(const char* firmwareURL);
 void performOTAUpdateViaAPI(const String& apiEndpoint, const String& ftpUrl);
@@ -45,6 +62,9 @@ static TimeSetup timeSetup;
 static GetIdLogLoss receivedMessage;
 bool inConfigPortal = false;
 
+// Nozzle prices storage
+static NozzlePrices nozzlePrices;
+
 // System state
 static uint32_t currentId = 0;
 static bool statusConnected = false;
@@ -68,6 +88,7 @@ static char topicShift[64];
 static char topicChange[64];
 static char topicOTA[64];             // topic for OTA firmware update
 static char topicUpdatePrice[64];     // topic for changing price
+static char topicGetPrice[64];        // topic for requesting current prices
 
 // FreeRTOS objects
 static QueueHandle_t mqttQueue = NULL;
@@ -312,6 +333,16 @@ void systemInit()
   // Load system data
   readFlashSettings(flashMutex, deviceStatus, counterReset);
   currentId = initializeCurrentId(flashMutex);
+  
+  // Load nozzle prices from Flash
+  Serial.println("Loading nozzle prices from Flash...");
+  if (loadNozzlePrices(nozzlePrices, flashMutex)) {
+    printNozzlePrices(nozzlePrices);
+  } else {
+    Serial.println("No saved prices found, initializing with defaults (0.0)");
+    // Save initial default prices
+    saveNozzlePrices(nozzlePrices, flashMutex);
+  }
 
   // Initialize WiFi
   WiFi.mode(WIFI_STA);
@@ -392,14 +423,14 @@ void checkHeap()
   deviceStatus.temperature = smoothedTemp;
   deviceStatus.counterReset = counterReset;
 
-  // Log memory status
-  Serial.printf("Heap: %u free, %u min free, Temp: %.1f°C\n",
+  // Log memory status (debug only)
+  DEBUG_PRINTF("Heap: %u free, %u min free, Temp: %.1f°C\n",
                 freeHeap, minFreeHeap, deviceStatus.temperature);
 
-  // Memory warning
+  // Memory warning (always log critical errors)
   if (freeHeap < 10000)
   {
-    Serial.println("WARNING: Low memory!");
+    LOG_ERROR("WARNING: Low memory!");
     setSystemStatus("WARNING", "Low memory: " + String(freeHeap) + " bytes");
   }
   else if (systemStatus == "WARNING" && lastError.indexOf("Low memory") >= 0)
@@ -665,7 +696,7 @@ void wifiTask(void *parameter)
 void mqttTask(void *parameter)
 {
   Serial.println("MQTT task started");
-  esp_task_wdt_add(NULL);
+  // esp_task_wdt_add(NULL);
 
   while (true)
   {
@@ -686,9 +717,6 @@ void mqttTask(void *parameter)
       }
       else
       {
-        // Process MQTT messages - CRITICAL for callback to work
-        mqttClient.loop();
-
         // Process MQTT queue
         PumpLog log;
         if (xQueueReceive(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
@@ -713,6 +741,7 @@ void mqttTask(void *parameter)
         mqttClient.unsubscribe(topicShift);
         mqttClient.unsubscribe(topicOTA);
         mqttClient.unsubscribe(topicUpdatePrice);
+        mqttClient.unsubscribe(topicGetPrice);
         mqttClient.disconnect();
         mqttSubscribed = false;
         Serial.println("MQTT cleanup completed");
@@ -723,7 +752,7 @@ void mqttTask(void *parameter)
     systemCheck();
 
     vTaskDelay(pdMS_TO_TICKS(100));
-    esp_task_wdt_reset();
+    // esp_task_wdt_reset();
     yield();
   }
 }
@@ -868,7 +897,9 @@ void setupMQTTTopics()
   snprintf(topicShift, sizeof(topicShift), "%s%s%s", companyInfo.Mst, TopicShift, TopicMqtt);
   snprintf(topicChange, sizeof(topicChange), "%s%s%s", companyInfo.Mst, TopicChange, TopicMqtt);
   snprintf(topicOTA, sizeof(topicOTA), "%s/OTA/%s", companyInfo.Mst, TopicMqtt);
+  
   snprintf(topicUpdatePrice, sizeof(topicUpdatePrice), "%s%s", companyInfo.CompanyId, TopicUpdatePrice);
+  snprintf(topicGetPrice, sizeof(topicGetPrice), "%s%s", companyInfo.Mst, TopicGetPrice);
   // snprintf(topicUpdatePrice, sizeof(topicUpdatePrice), "%s%s%s", companyInfo.CompanyId, TopicUpdatePrice);
 
   Serial.printf("MQTT topics configured - Company ID: %s (MST: %s)\n", companyInfo.CompanyId, companyInfo.Mst);
@@ -886,6 +917,7 @@ void setupMQTTTopics()
     bool sub5 = mqttClient.subscribe(topicShift);
     bool sub6 = mqttClient.subscribe(topicOTA);
     bool sub7 = mqttClient.subscribe(topicUpdatePrice);
+    bool sub8 = mqttClient.subscribe(topicGetPrice);
 
     Serial.printf("Subscription results:\n");
     Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
@@ -895,10 +927,11 @@ void setupMQTTTopics()
     Serial.printf("  Shift (%s): %s\n", topicShift, sub5 ? "SUCCESS" : "FAILED");
     Serial.printf("  OTA (%s): %s\n", topicOTA, sub6 ? "SUCCESS" : "FAILED");
     Serial.printf("  UpdatePrice (%s): %s\n", topicUpdatePrice, sub7 ? "SUCCESS" : "FAILED");
+    Serial.printf("  GetPrice (%s): %s\n", topicGetPrice, sub8 ? "SUCCESS" : "FAILED");
     Serial.println("=== SUBSCRIPTION COMPLETE ===");
     
     // Set subscription flag
-    mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7);
+    mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7 && sub8);
     Serial.printf("MQTT subscription state: %s\n", mqttSubscribed ? "SUBSCRIBED" : "PARTIAL_FAILURE");
       }
       else
@@ -933,6 +966,7 @@ void connectMQTT()
       bool sub5 = mqttClient.subscribe(topicShift);
       bool sub6 = mqttClient.subscribe(topicOTA);
       bool sub7 = mqttClient.subscribe(topicUpdatePrice);
+      bool sub8 = mqttClient.subscribe(topicGetPrice);
 
       Serial.printf("Re-subscription results:\n");
       Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
@@ -942,11 +976,18 @@ void connectMQTT()
       Serial.printf("  Shift (%s): %s\n", topicShift, sub5 ? "SUCCESS" : "FAILED");
       Serial.printf("  OTA (%s): %s\n", topicOTA, sub6 ? "SUCCESS" : "FAILED");
       Serial.printf("  UpdatePrice (%s): %s\n", topicUpdatePrice, sub7 ? "SUCCESS" : "FAILED");
+      Serial.printf("  GetPrice (%s): %s\n", topicGetPrice, sub8 ? "SUCCESS" : "FAILED");
       Serial.println("=== RE-SUBSCRIPTION COMPLETE ===");
       
       // Set subscription flag
-      mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7);
+      mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7 && sub8);
       Serial.printf("MQTT re-subscription state: %s\n", mqttSubscribed ? "SUBSCRIBED" : "PARTIAL_FAILURE");
+      
+      // Publish saved prices from Flash after successful MQTT connection
+      Serial.println("\n=== PUBLISHING SAVED PRICES FROM FLASH ===");
+      publishSavedPricesToMQTT(nozzlePrices, mqttClient, companyInfo.CompanyId, 
+                              companyInfo.Mst, TopicMqtt);
+      Serial.println("=== SAVED PRICES PUBLISHED ===\n");
     }
   }
   else
@@ -999,8 +1040,8 @@ void sendDeviceStatus()
 
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
-  Serial.printf("=== MQTT CALLBACK TRIGGERED ===\n");
-  Serial.printf("Topic: %s\n", topic);
+  DEBUG_PRINTF("=== MQTT CALLBACK TRIGGERED ===\n");
+  DEBUG_PRINTF("Topic: %s\n", topic);
   
   // Handle Restart command
   if (strcmp(topic, topicRestart) == 0)
@@ -1113,16 +1154,40 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   // Handle ChangePrice command
   if (strcmp(topic, topicUpdatePrice) == 0)
   {
-    Serial.printf("[MQTT] UpdatePrice command received - parsing payload...\n");
-    Serial.printf("[MQTT] Current device MST: %s\n", companyInfo.Mst);
-    Serial.printf("[MQTT] Payload length: %d bytes\n", length);
+    DEBUG_PRINTF("[MQTT] UpdatePrice command received - parsing payload...\n");
+    DEBUG_PRINTF("[MQTT] Current device MST: %s\n", companyInfo.Mst);
+    DEBUG_PRINTF("[MQTT] Payload length: %d bytes\n", length);
     
-    // Print raw payload for debugging
-    Serial.print("[MQTT] Raw payload: ");
-    for (size_t i = 0; i < length && i < 500; i++) {
-      Serial.print((char)payload[i]);
+    // Sync time from NTP before updating price to ensure accurate timestamp
+    Serial.println("[MQTT] Syncing time from NTP server...");
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    
+    // Wait a bit for time sync (non-blocking)
+    struct tm timeinfo;
+    int syncRetry = 0;
+    while (!getLocalTime(&timeinfo) && syncRetry < 5)
+    {
+      vTaskDelay(pdMS_TO_TICKS(200));
+      syncRetry++;
     }
-    Serial.println();
+    
+    if (syncRetry < 5)
+    {
+      Serial.printf("[MQTT] ✓ Time synced: %04d-%02d-%02d %02d:%02d:%02d\n",
+                   timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                   timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    }
+    else
+    {
+      Serial.println("[MQTT] ⚠️ Time sync timeout, using system time");
+    }
+    
+    // Print raw payload for debugging (debug only)
+    DEBUG_PRINT("[MQTT] Raw payload: ");
+    for (size_t i = 0; i < length && i < 500; i++) {
+      DEBUG_PRINT((char)payload[i]);
+    }
+    DEBUG_PRINTLN("");
     
     // Parse JSON payload with new structure: {"topic":"...", "clientid":"...", "message":[...]}
     DynamicJsonDocument doc(2048); // Increase size for nested structure
@@ -1172,16 +1237,17 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       
       const char* idChiNhanh = item["IDChiNhanh"] | "";
       const char* idDevice = item["IdDevice"] | "";
+      const char* nozzorle = item["Nozzorle"] | "";
       
       // Check if this is for current company (compare IDChiNhanh with MST)
       if (strlen(idChiNhanh) > 0 && strcmp(idChiNhanh, companyInfo.Mst) != 0)
       {
-        Serial.printf("[MQTT] Skipping - IDChiNhanh=%s doesn't match MST=%s\n", idChiNhanh, companyInfo.Mst);
+        DEBUG_PRINTF("[MQTT] Skipping - IDChiNhanh=%s doesn't match MST=%s\n", idChiNhanh, companyInfo.Mst);
         skipped++;
         continue;
       }
       
-      Serial.printf("[MQTT] ✅ Processing Entry: IDChiNhanh=%s, IdDevice=%s\n", idChiNhanh, idDevice);
+      DEBUG_PRINTF("[MQTT] ✅ Processing Entry: IDChiNhanh=%s, IdDevice=%s, Nozzorle=%s\n", idChiNhanh, idDevice, nozzorle);
       
       // Handle null UnitPrice
       if (item["UnitPrice"].isNull())
@@ -1192,34 +1258,29 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       }
       
       float unitPrice = item["UnitPrice"] | 0.0f;
-      Serial.printf("[MQTT] UnitPrice=%.2f\n", unitPrice);
+      DEBUG_PRINTF("[MQTT] UnitPrice=%.2f\n", unitPrice);
       
-      // Parse IdDevice to get pump number (e.g., "QA-T01-V01" -> 1, "QA-T01-V02" -> 2)
-      // Extract the last 2 digits after the last '-V'
-      const char* vPos = strrchr(idDevice, 'V');
-      uint8_t pumpNumber = 1; // Default to 1
-      
-      if (vPos != NULL)
+      // Use Nozzorle field as RS485 Device ID directly
+      // Nozzorle is provided as string (e.g., "11", "12", "13", ..., "20")
+      if (strlen(nozzorle) == 0)
       {
-        pumpNumber = atoi(vPos + 1); // Convert string after 'V' to integer
-        Serial.printf("[MQTT] Parsed pump number from IdDevice: %d\n", pumpNumber);
-      }
-      else
-      {
-        Serial.printf("[MQTT] Warning: Could not parse pump number from IdDevice=%s, using default=1\n", idDevice);
-      }
-      
-      // Map pump number to RS485 Device ID (1->11, 2->12, ..., 10->20)
-      uint8_t deviceIdNum = 10 + pumpNumber;
-      
-      if (deviceIdNum < 11 || deviceIdNum > 20)
-      {
-        Serial.printf("[MQTT] Invalid pump ID: %d (must be 11-20), skipping...\n", deviceIdNum);
+        Serial.printf("[MQTT] Error: Missing Nozzorle field for IdDevice=%s, skipping...\n", idDevice);
         skipped++;
         continue;
       }
       
-      Serial.printf("[MQTT] Mapped to RS485 PumpID=%d\n", deviceIdNum);
+      // Parse Nozzorle to integer (already RS485 Device ID)
+      uint8_t deviceIdNum = atoi(nozzorle);
+      
+      // Validate range (11-20)
+      if (deviceIdNum < 11 || deviceIdNum > 20)
+      {
+        Serial.printf("[MQTT] Invalid Nozzorle: %s (must be 11-20), skipping...\n", nozzorle);
+        skipped++;
+        continue;
+      }
+      
+      DEBUG_PRINTF("[MQTT] Nozzorle=%s -> RS485 DeviceID=%d\n", nozzorle, deviceIdNum);
       
       // Create price change request for this specific pump
       PriceChangeRequest request;
@@ -1252,6 +1313,72 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       setSystemStatus("OK", String("Queued ") + String(queued) + " price change(s)");
     } else {
       setSystemStatus("WARNING", "No price changes queued");
+    }
+  }
+  
+  // Handle GetPrice command - Request current prices from Flash
+  if (strcmp(topic, topicGetPrice) == 0)
+  {
+    Serial.println("[MQTT] GetPrice command received - reading prices from Flash...");
+    
+    // Load latest prices from Flash
+    NozzlePrices currentPrices;
+    if (!loadNozzlePrices(currentPrices, flashMutex))
+    {
+      Serial.println("[MQTT] ✗ Failed to load prices from Flash");
+      setSystemStatus("ERROR", "Failed to load prices from Flash");
+      return;
+    }
+    
+    Serial.println("[MQTT] ✓ Prices loaded from Flash, publishing...");
+    
+    // Build response topic: {IdChiNhanh}/ResponsePrice
+    char responseTopic[64];
+    snprintf(responseTopic, sizeof(responseTopic), "%s/ResponsePrice", companyInfo.Mst);
+    
+    // Create JSON response with all nozzle prices
+    DynamicJsonDocument doc(1024);
+    doc["topic"] = companyInfo.CompanyId;
+    doc["clientid"] = TopicMqtt;
+    doc["timestamp"] = currentPrices.lastUpdate;
+    
+    // Create prices array for all 10 nozzles (11-20)
+    JsonArray pricesArray = doc.createNestedArray("prices");
+    for (int i = 0; i < 10; i++)
+    {
+      JsonObject nozzle = pricesArray.createNestedObject();
+      nozzle["Nozzle"] = currentPrices.nozzles[i].nozzorle[0] ? currentPrices.nozzles[i].nozzorle : String(11 + i);
+      nozzle["IdDevice"] = currentPrices.nozzles[i].idDevice;
+      nozzle["UnitPrice"] = currentPrices.nozzles[i].price;
+      
+      // Format timestamp to dd/mm/yyyy-HH:MM:SS
+      time_t timestamp = currentPrices.nozzles[i].updatedAt;
+      if (timestamp > 0) {
+        struct tm *timeinfo = localtime(&timestamp);
+        char formattedTime[32];
+        snprintf(formattedTime, sizeof(formattedTime), "%02d/%02d/%04d-%02d:%02d:%02d",
+                 timeinfo->tm_mday, timeinfo->tm_mon + 1, timeinfo->tm_year + 1900,
+                 timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+        nozzle["UpdatedAt"] = formattedTime;
+      } else {
+        nozzle["UpdatedAt"] = "N/A";  // Chưa có giá trị
+      }
+    }
+    
+    // Serialize and publish
+    String jsonString;
+    serializeJson(doc, jsonString);
+    
+    if (mqttClient.publish(responseTopic, jsonString.c_str()))
+    {
+      Serial.printf("[MQTT] ✓ Published ResponsePrice to %s\n", responseTopic);
+      Serial.printf("[MQTT] Payload: %s\n", jsonString.c_str());
+      setSystemStatus("OK", "Price data published");
+    }
+    else
+    {
+      Serial.printf("[MQTT] ✗ Failed to publish ResponsePrice to %s\n", responseTopic);
+      setSystemStatus("ERROR", "Failed to publish price data");
     }
   }
   
@@ -1359,21 +1486,31 @@ void readRS485Data(byte *buffer)
           return;
         }
         
-        // Log valid response
-        Serial.printf("\n[RS485 READ] Price Change Response: ");
+        // Log valid response (debug only)
+        DEBUG_PRINTF("\n[RS485 READ] Price Change Response: ");
         for (int i = 0; i < 4; i++) {
           if (i == 2) {
-            Serial.printf("'%c'(0x%02X) ", priceResponse[i], priceResponse[i]);
+            DEBUG_PRINTF("'%c'(0x%02X) ", priceResponse[i], priceResponse[i]);
           } else {
-            Serial.printf("0x%02X ", priceResponse[i]);
+            DEBUG_PRINTF("0x%02X ", priceResponse[i]);
           }
         }
-        Serial.println();
+        DEBUG_PRINTLN("");
         
         // Parse status
         if (status == 'S')
         {
-          Serial.printf("[RS485 READ] ✓ SUCCESS - DeviceID=%d price updated successfully\n", deviceId);
+          DEBUG_PRINTF("[RS485 READ] ✓ SUCCESS - DeviceID=%d price updated successfully\n", deviceId);
+          
+          // Save price to Flash for this nozzle
+          if (deviceId == lastPriceChangeRequest.deviceId)
+          {
+            // Convert deviceId to nozzorle string
+            char nozzorleStr[4];
+            snprintf(nozzorleStr, sizeof(nozzorleStr), "%d", deviceId);
+            updateNozzlePrice(nozzorleStr, lastPriceChangeRequest.idDevice, 
+                            lastPriceChangeRequest.unitPrice, nozzlePrices, flashMutex);
+          }
           
           // Publish Complete response to MQTT
           if (mqttClient.connected() && deviceId == lastPriceChangeRequest.deviceId)
@@ -1392,14 +1529,29 @@ void readRS485Data(byte *buffer)
                      lastPriceChangeRequest.idChiNhanh, TopicMqtt);
             doc["clientid"] = clientId;
             
-            // Build message object (NOT array)
-            JsonObject message = doc.createNestedObject("message");
-            message["Key"] = "UpdatePrice";
+            // Get timestamp from the nozzle that was just updated
+            int nozzleIndex = deviceId - 11;  // Map 11-20 to index 0-9
+            time_t updatedTimestamp = nozzlePrices.nozzles[nozzleIndex].updatedAt;
             
-            JsonObject item = message.createNestedObject("item");
+            // Format timestamp to dd/mm/yyyy-HH:MM:SS
+            struct tm *timeinfo = localtime(&updatedTimestamp);
+            char formattedTime[32];
+            snprintf(formattedTime, sizeof(formattedTime), "%02d/%02d/%04d-%02d:%02d:%02d",
+                     timeinfo->tm_mday, timeinfo->tm_mon + 1, timeinfo->tm_year + 1900,
+                     timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+            
+            doc["timestamp"] = formattedTime;
+            
+            // Build message array
+            JsonArray messageArray = doc.createNestedArray("message");
+            JsonObject entry = messageArray.createNestedObject();
+            entry["Key"] = "UpdatePrice";
+            
+            JsonObject item = entry.createNestedObject("item");
             item["IDChiNhanh"] = lastPriceChangeRequest.idChiNhanh;
             item["IdDevice"] = lastPriceChangeRequest.idDevice;
             item["UnitPrice"] = lastPriceChangeRequest.unitPrice;
+            item["UpdatedAt"] = formattedTime;  // Formatted timestamp từ Flash
             
             String jsonString;
             serializeJson(doc, jsonString);
@@ -1575,12 +1727,12 @@ void sendPriceChangeCommand(const PriceChangeRequest &request)
   uint8_t buffer[10];
   buffer[0] = 9;                 // PM command (Dec 9)
   buffer[1] = request.deviceId;  // ID Device (11-20)
-  buffer[2] = priceStr[0];       // Đơn giá Char(0) - ASCII
-  buffer[3] = priceStr[1];       // Đơn giá Char(1) - ASCII
-  buffer[4] = priceStr[2];       // Đơn giá Char(2) - ASCII
-  buffer[5] = priceStr[3];       // Đơn giá Char(3) - ASCII
-  buffer[6] = priceStr[4];       // Đơn giá Char(4) - ASCII
-  buffer[7] = priceStr[5];       // Đơn giá Char(5) - ASCII
+  buffer[2] = priceStr[5];       // Đơn giá Char(0) - ASCII
+  buffer[3] = priceStr[4];       // Đơn giá Char(1) - ASCII
+  buffer[4] = priceStr[3];       // Đơn giá Char(2) - ASCII
+  buffer[5] = priceStr[2];       // Đơn giá Char(3) - ASCII
+  buffer[6] = priceStr[1];       // Đơn giá Char(4) - ASCII
+  buffer[7] = priceStr[0];       // Đơn giá Char(5) - ASCII
   
   // Calculate checksum: 0x5A XOR all data bytes (ID + Price chars)
   uint8_t checksum = 0x5A ^ buffer[1] ^ buffer[2] ^ buffer[3] ^ buffer[4] ^ buffer[5] ^ buffer[6] ^ buffer[7];

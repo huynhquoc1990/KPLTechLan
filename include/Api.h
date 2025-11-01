@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include "structdata.h"
 #include "FlashFile.h"
-#include <ETH.h>
+// #include <ETH.h>  // Không sử dụng Ethernet
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <freertos/queue.h>

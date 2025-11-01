@@ -4,22 +4,22 @@
 
 # --- Configuration ---
 PIO_PATH="$HOME/.platformio/penv/bin/pio"
-FIRMWARE_SOURCE=".pio/build/denky32/firmware.bin"
+FIRMWARE_SOURCE=".pio/build/release/firmware.bin"
 PROJECT_NAME="KPLTechLan"
 VERSION_PREFIX="v1.0" # You can change this prefix, e.g., v1.1, v2.0
 
 # --- Script Logic ---
 set -e # Exit immediately if a command exits with a non-zero status.
 
-echo "🚀 Starting GitHub Release Preparation..."
+echo "🚀 Starting GitHub Release Preparation (RELEASE mode)..."
 
 # 1. Clean previous builds to ensure a fresh compile
 echo "🧹 Cleaning old build files..."
 "$PIO_PATH" run -t clean
 
-# 2. Build the firmware
-echo "🛠️  Building firmware..."
-"$PIO_PATH" run
+# 2. Build the firmware (RELEASE only - production ready)
+echo "🛠️  Building firmware (RELEASE mode - no debug logs)..."
+"$PIO_PATH" run -e release
 
 # 3. Check if build was successful
 if [ ! -f "$FIRMWARE_SOURCE" ]; then
@@ -28,6 +28,10 @@ if [ ! -f "$FIRMWARE_SOURCE" ]; then
 fi
 
 echo "✅ Build successful!"
+
+# Show firmware size
+FIRMWARE_SIZE=$(ls -lh "$FIRMWARE_SOURCE" | awk '{print $5}')
+echo "📊 Firmware size: $FIRMWARE_SIZE (RELEASE - optimized for production)"
 
 # 4. Create versioned filename
 TIMESTAMP=$(date +"%Y%m%d-%H%M")
