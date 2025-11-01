@@ -50,6 +50,7 @@ static uint32_t currentId = 0;
 static bool statusConnected = false;
 static bool isLoggedIn = false;
 static bool mqttTopicsConfigured = false;
+static bool mqttSubscribed = false; // Track subscription state
 static unsigned long counterReset = 0;
 static unsigned long lastHeapCheck = 0;
 static String systemStatus = "OK";
@@ -66,7 +67,7 @@ static char topicGetLogIdLoss[64];
 static char topicShift[64];
 static char topicChange[64];
 static char topicOTA[64];             // topic for OTA firmware update
-static char topicChangePrice[64];     // topic for changing price
+static char topicUpdatePrice[64];     // topic for changing price
 
 // FreeRTOS objects
 static QueueHandle_t mqttQueue = NULL;
@@ -315,8 +316,8 @@ void systemInit()
   // Initialize WiFi
   WiFi.mode(WIFI_STA);
 
-  // Initialize MQTT
-  mqttClient.setServer(mqttServer, 1883);
+  // Initialize MQTT - will be updated from API settings
+  mqttClient.setServer(mqttServer, 1883); // Default server, will be updated from API
   mqttClient.setBufferSize(1024); // Increase buffer size from default 128
   mqttClient.setCallback(mqttCallback);
   
@@ -573,7 +574,18 @@ void wifiTask(void *parameter)
       {
         Serial.println("WiFi connected successfully.");
         setupTime();
-        setupMQTTTopics();
+        
+        // Only setup MQTT topics if not already configured
+        if (!mqttTopicsConfigured)
+        {
+          Serial.println("Setting up MQTT topics for first time...");
+          setupMQTTTopics();
+        }
+        else
+        {
+          Serial.println("MQTT topics already configured, skipping setup");
+        }
+        
         readMacEsp();
         statusConnected = true;
       }
@@ -582,6 +594,26 @@ void wifiTask(void *parameter)
         static uint32_t cooldownSeconds = 10; // exponential backoff, capped
         Serial.printf("WiFi connection failed, cooling radio for %lus...\n", cooldownSeconds);
         setSystemStatus("ERROR", "WiFi connection failed");
+        
+        // Reset MQTT state when WiFi fails
+        mqttTopicsConfigured = false;
+        statusConnected = false;
+        
+        // Unsubscribe from MQTT topics before disconnecting
+        if (mqttClient.connected() && mqttSubscribed)
+        {
+          Serial.println("WiFi lost - unsubscribing from MQTT topics...");
+          mqttClient.unsubscribe(topicErrorSub);
+          mqttClient.unsubscribe(topicRestart);
+          mqttClient.unsubscribe(topicGetLogIdLoss);
+          mqttClient.unsubscribe(topicChange);
+          mqttClient.unsubscribe(topicShift);
+          mqttClient.unsubscribe(topicOTA);
+          mqttClient.unsubscribe(topicUpdatePrice);
+          mqttClient.disconnect();
+          mqttSubscribed = false;
+          Serial.println("MQTT topics unsubscribed and disconnected");
+        }
 
         // Turn radio off during cooldown to reduce temperature
         WiFi.disconnect(true, true);
@@ -610,6 +642,17 @@ void wifiTask(void *parameter)
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(1000));
       }
+      
+      // Log WiFi/MQTT status periodically
+      static unsigned long lastStatusLog = 0;
+      if (millis() - lastStatusLog > 60000) // Every 60 seconds
+      {
+        Serial.printf("WiFi Status: %s, MQTT Topics: %s, MQTT Connected: %s\n", 
+                     WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED",
+                     mqttTopicsConfigured ? "CONFIGURED" : "NOT_CONFIGURED",
+                     mqttClient.connected() ? "CONNECTED" : "DISCONNECTED");
+        lastStatusLog = millis();
+      }
     }
     yield();
   }
@@ -628,6 +671,15 @@ void mqttTask(void *parameter)
   {
     if (WiFi.status() == WL_CONNECTED)
     {
+      // Wait for MQTT topics to be configured before attempting connection
+      if (!mqttTopicsConfigured)
+      {
+        Serial.println("MQTT topics not configured yet, waiting...");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_task_wdt_reset();
+        continue;
+      }
+      
       if (!mqttClient.connected())
       {
         connectMQTT();
@@ -646,6 +698,24 @@ void mqttTask(void *parameter)
         
         // Additional loop call to ensure callback processing
         mqttClient.loop();
+      }
+    }
+    else
+    {
+      // WiFi disconnected - unsubscribe and disconnect MQTT
+      if (mqttClient.connected() && mqttSubscribed)
+      {
+        Serial.println("WiFi disconnected - cleaning up MQTT subscriptions...");
+        mqttClient.unsubscribe(topicErrorSub);
+        mqttClient.unsubscribe(topicRestart);
+        mqttClient.unsubscribe(topicGetLogIdLoss);
+        mqttClient.unsubscribe(topicChange);
+        mqttClient.unsubscribe(topicShift);
+        mqttClient.unsubscribe(topicOTA);
+        mqttClient.unsubscribe(topicUpdatePrice);
+        mqttClient.disconnect();
+        mqttSubscribed = false;
+        Serial.println("MQTT cleanup completed");
       }
     }
 
@@ -758,8 +828,28 @@ void setupTime()
 
 void setupMQTTTopics()
 {
-  // Get company info
+  // Get MQTT settings from API
   callAPIGetSettingsMqtt(&settings, flashMutex);
+  
+  // Update MQTT server with settings from API
+  if (strlen(settings.MqttServer) > 0)
+  {
+    // Disconnect if currently connected to force reconnection with new server
+    if (mqttClient.connected())
+    {
+      mqttClient.disconnect();
+      Serial.println("MQTT disconnected to update server settings");
+    }
+    
+    mqttClient.setServer(settings.MqttServer, settings.PortMqtt);
+    // Serial.printf("MQTT server updated from API: %s:%d\n", settings.MqttServer, settings.PortMqtt);
+  }
+  else
+  {
+    Serial.println("Using default MQTT server (no API settings)");
+  }
+  
+  // Get company info
   xTaskCreate(callAPIServerGetCompanyInfo, "getCompanyInfo", 2048, &companyInfo, 2, NULL);
 
   // Wait for company info
@@ -778,9 +868,10 @@ void setupMQTTTopics()
   snprintf(topicShift, sizeof(topicShift), "%s%s%s", companyInfo.Mst, TopicShift, TopicMqtt);
   snprintf(topicChange, sizeof(topicChange), "%s%s%s", companyInfo.Mst, TopicChange, TopicMqtt);
   snprintf(topicOTA, sizeof(topicOTA), "%s/OTA/%s", companyInfo.Mst, TopicMqtt);
-  snprintf(topicChangePrice, sizeof(topicChangePrice), "%s%s%s", companyInfo.Mst, TopicChangePrice, TopicMqtt);
+  snprintf(topicUpdatePrice, sizeof(topicUpdatePrice), "%s%s", companyInfo.CompanyId, TopicUpdatePrice);
+  // snprintf(topicUpdatePrice, sizeof(topicUpdatePrice), "%s%s%s", companyInfo.CompanyId, TopicUpdatePrice);
 
-  Serial.printf("MQTT topics configured - Company ID: %s (MST: %s)\n", companyInfo.Mst, companyInfo.Mst);
+  Serial.printf("MQTT topics configured - Company ID: %s (MST: %s)\n", companyInfo.CompanyId, companyInfo.Mst);
   mqttTopicsConfigured = true;
 
   // Subscribe to topics if MQTT is connected
@@ -794,7 +885,7 @@ void setupMQTTTopics()
     bool sub4 = mqttClient.subscribe(topicChange);
     bool sub5 = mqttClient.subscribe(topicShift);
     bool sub6 = mqttClient.subscribe(topicOTA);
-    bool sub7 = mqttClient.subscribe(topicChangePrice);
+    bool sub7 = mqttClient.subscribe(topicUpdatePrice);
 
     Serial.printf("Subscription results:\n");
     Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
@@ -803,8 +894,12 @@ void setupMQTTTopics()
     Serial.printf("  Change (%s): %s\n", topicChange, sub4 ? "SUCCESS" : "FAILED");
     Serial.printf("  Shift (%s): %s\n", topicShift, sub5 ? "SUCCESS" : "FAILED");
     Serial.printf("  OTA (%s): %s\n", topicOTA, sub6 ? "SUCCESS" : "FAILED");
-    Serial.printf("  ChangePrice (%s): %s\n", topicChangePrice, sub7 ? "SUCCESS" : "FAILED");
+    Serial.printf("  UpdatePrice (%s): %s\n", topicUpdatePrice, sub7 ? "SUCCESS" : "FAILED");
     Serial.println("=== SUBSCRIPTION COMPLETE ===");
+    
+    // Set subscription flag
+    mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7);
+    Serial.printf("MQTT subscription state: %s\n", mqttSubscribed ? "SUBSCRIBED" : "PARTIAL_FAILURE");
       }
       else
       {
@@ -815,6 +910,10 @@ void setupMQTTTopics()
 void connectMQTT()
 {
   Serial.println("Connecting to MQTT...");
+  
+  // Set connection timeout
+  mqttClient.setKeepAlive(60);
+  mqttClient.setSocketTimeout(15);
 
   if (mqttClient.connect(TopicMqtt, mqttUser, mqttPassword))
   {
@@ -833,7 +932,7 @@ void connectMQTT()
       bool sub4 = mqttClient.subscribe(topicChange);
       bool sub5 = mqttClient.subscribe(topicShift);
       bool sub6 = mqttClient.subscribe(topicOTA);
-      bool sub7 = mqttClient.subscribe(topicChangePrice);
+      bool sub7 = mqttClient.subscribe(topicUpdatePrice);
 
       Serial.printf("Re-subscription results:\n");
       Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
@@ -842,12 +941,16 @@ void connectMQTT()
       Serial.printf("  Change (%s): %s\n", topicChange, sub4 ? "SUCCESS" : "FAILED");
       Serial.printf("  Shift (%s): %s\n", topicShift, sub5 ? "SUCCESS" : "FAILED");
       Serial.printf("  OTA (%s): %s\n", topicOTA, sub6 ? "SUCCESS" : "FAILED");
-      Serial.printf("  ChangePrice (%s): %s\n", topicChangePrice, sub7 ? "SUCCESS" : "FAILED");
+      Serial.printf("  UpdatePrice (%s): %s\n", topicUpdatePrice, sub7 ? "SUCCESS" : "FAILED");
       Serial.println("=== RE-SUBSCRIPTION COMPLETE ===");
+      
+      // Set subscription flag
+      mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7);
+      Serial.printf("MQTT re-subscription state: %s\n", mqttSubscribed ? "SUBSCRIBED" : "PARTIAL_FAILURE");
     }
-        }
-        else
-        {
+  }
+  else
+  {
     Serial.printf("MQTT connection failed. State: %d\n", mqttClient.state());
     setSystemStatus("ERROR", "MQTT connection failed - state: " + String(mqttClient.state()));
     vTaskDelay(pdMS_TO_TICKS(5000));
@@ -1008,9 +1111,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   }
   
   // Handle ChangePrice command
-  if (strcmp(topic, topicChangePrice) == 0)
+  if (strcmp(topic, topicUpdatePrice) == 0)
   {
-    Serial.printf("[MQTT] ChangePrice command received - parsing payload...\n");
+    Serial.printf("[MQTT] UpdatePrice command received - parsing payload...\n");
     Serial.printf("[MQTT] Current device MST: %s\n", companyInfo.Mst);
     Serial.printf("[MQTT] Payload length: %d bytes\n", length);
     
@@ -1021,32 +1124,40 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     }
     Serial.println();
     
-    // Parse JSON array payload
-    DynamicJsonDocument doc(2048); // Increase size for array
+    // Parse JSON payload with new structure: {"topic":"...", "clientid":"...", "message":[...]}
+    DynamicJsonDocument doc(2048); // Increase size for nested structure
     DeserializationError error = deserializeJson(doc, payload, length);
     
     if (error)
     {
-      Serial.printf("[MQTT] ChangePrice: JSON parse error: %s\n", error.c_str());
-      setSystemStatus("ERROR", "ChangePrice: Invalid JSON payload");
+      Serial.printf("[MQTT] UpdatePrice: JSON parse error: %s\n", error.c_str());
+      setSystemStatus("ERROR", "UpdatePrice: Invalid JSON payload");
       return;
     }
     
-    // Check if payload is an array
-    if (!doc.is<JsonArray>())
+    // Check if root is an object
+    if (!doc.is<JsonObject>())
     {
-      Serial.println("[MQTT] ChangePrice: Payload is not a JSON array");
-      setSystemStatus("ERROR", "ChangePrice: Expected JSON array");
+      Serial.println("[MQTT] UpdatePrice: Payload is not a JSON object");
+      setSystemStatus("ERROR", "UpdatePrice: Expected JSON object");
       return;
     }
     
-    JsonArray priceArray = doc.as<JsonArray>();
-    Serial.printf("[MQTT] ChangePrice: Received %d price entries\n", priceArray.size());
+    // Extract message array from the payload
+    JsonArray priceArray = doc["message"];
+    if (priceArray.isNull())
+    {
+      Serial.println("[MQTT] UpdatePrice: Missing 'message' field");
+      setSystemStatus("ERROR", "UpdatePrice: Missing 'message' array");
+      return;
+    }
+    
+    Serial.printf("[MQTT] UpdatePrice: Received %d price entries\n", priceArray.size());
     
     // Parse and queue each price change request for RS485 task to process
+    // Each device will only process messages that match its own IDChiNhanh and IdDevice
     int queued = 0;
     int skipped = 0;
-    uint8_t deviceIdSequence = 11; // Start from ID 11, increment for each valid entry
     
     for (JsonObject entry : priceArray)
     {
@@ -1070,8 +1181,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         continue;
       }
       
-      Serial.printf("[MQTT] Processing Entry #%d: IDChiNhanh=%s, IdDevice=%s\n", 
-                    deviceIdSequence - 10, idChiNhanh, idDevice);
+      Serial.printf("[MQTT] ✅ Processing Entry: IDChiNhanh=%s, IdDevice=%s\n", idChiNhanh, idDevice);
       
       // Handle null UnitPrice
       if (item["UnitPrice"].isNull())
@@ -1084,19 +1194,34 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       float unitPrice = item["UnitPrice"] | 0.0f;
       Serial.printf("[MQTT] UnitPrice=%.2f\n", unitPrice);
       
-      // Assign sequential device ID (11, 12, 13, ... up to 20 max)
-      uint8_t deviceIdNum = deviceIdSequence;
+      // Parse IdDevice to get pump number (e.g., "QA-T01-V01" -> 1, "QA-T01-V02" -> 2)
+      // Extract the last 2 digits after the last '-V'
+      const char* vPos = strrchr(idDevice, 'V');
+      uint8_t pumpNumber = 1; // Default to 1
       
-      if (deviceIdNum > 20)
+      if (vPos != NULL)
       {
-        Serial.printf("[MQTT] Maximum devices reached (max 10, ID 11-20)\n");
+        pumpNumber = atoi(vPos + 1); // Convert string after 'V' to integer
+        Serial.printf("[MQTT] Parsed pump number from IdDevice: %d\n", pumpNumber);
+      }
+      else
+      {
+        Serial.printf("[MQTT] Warning: Could not parse pump number from IdDevice=%s, using default=1\n", idDevice);
+      }
+      
+      // Map pump number to RS485 Device ID (1->11, 2->12, ..., 10->20)
+      uint8_t deviceIdNum = 10 + pumpNumber;
+      
+      if (deviceIdNum < 11 || deviceIdNum > 20)
+      {
+        Serial.printf("[MQTT] Invalid pump ID: %d (must be 11-20), skipping...\n", deviceIdNum);
         skipped++;
         continue;
       }
       
-      Serial.printf("[MQTT] Assigned RS485 Device ID: %d for IdDevice=%s\n", deviceIdNum, idDevice);
+      Serial.printf("[MQTT] Mapped to RS485 PumpID=%d\n", deviceIdNum);
       
-      // Create price change request
+      // Create price change request for this specific pump
       PriceChangeRequest request;
       request.deviceId = deviceIdNum;
       request.unitPrice = unitPrice;
@@ -1109,13 +1234,12 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       if (xQueueSend(priceChangeQueue, &request, pdMS_TO_TICKS(100)) == pdTRUE)
       {
         queued++;
-        Serial.printf("[MQTT] ✓ Queued price change: DeviceID=%d, Price=%.2f\n", deviceIdNum, unitPrice);
-        deviceIdSequence++; // Increment for next entry
+        Serial.printf("[MQTT] ✓ Queued price change: IdDevice=%s -> PumpID=%d, Price=%.2f\n", idDevice, deviceIdNum, unitPrice);
       }
       else
       {
         skipped++;
-        Serial.printf("[MQTT] ✗ Failed to queue: Queue full for DeviceID=%d\n", deviceIdNum);
+        Serial.printf("[MQTT] ✗ Failed to queue: Queue full for PumpID=%d\n", deviceIdNum);
       }
     }
     
@@ -1222,6 +1346,20 @@ void readRS485Data(byte *buffer)
         uint8_t deviceId = priceResponse[1];
         char status = priceResponse[2];
         
+        // Validate deviceId is in valid range (11-20)
+        if (deviceId < 11 || deviceId > 20)
+        {
+          // Reduce log spam - only log every 10th invalid response
+          static int invalidCount = 0;
+          invalidCount++;
+          if (invalidCount % 10 == 0)
+          {
+            Serial.printf("[RS485 READ] ⚠️ Ignoring invalid DeviceID=%d (count: %d, valid range: 11-20)\n", deviceId, invalidCount);
+          }
+          return;
+        }
+        
+        // Log valid response
         Serial.printf("\n[RS485 READ] Price Change Response: ");
         for (int i = 0; i < 4; i++) {
           if (i == 2) {
@@ -1240,17 +1378,25 @@ void readRS485Data(byte *buffer)
           // Publish Complete response to MQTT
           if (mqttClient.connected() && deviceId == lastPriceChangeRequest.deviceId)
           {
-            // Build response topic: IDChiNhanh/ChangePrice
+            // Build response topic: {CompanyId}/FinishPrice
             char responseTopic[100];
-            snprintf(responseTopic, sizeof(responseTopic), "%s/ChangePrice", lastPriceChangeRequest.idChiNhanh);
+            snprintf(responseTopic, sizeof(responseTopic), "%s/FinishPrice", companyInfo.CompanyId);
             
-            // Build JSON response
-            DynamicJsonDocument doc(512);
-            JsonArray array = doc.to<JsonArray>();
-            JsonObject entry = array.createNestedObject();
-            entry["Key"] = "Complete";
+            // Build JSON response with new structure
+            DynamicJsonDocument doc(1024);
+            doc["topic"] = lastPriceChangeRequest.idChiNhanh;
             
-            JsonObject item = entry.createNestedObject("item");
+            // Build clientid: {IDChiNhanh}/GetStatus/{TopicMqtt}
+            char clientId[100];
+            snprintf(clientId, sizeof(clientId), "%s/GetStatus/%s", 
+                     lastPriceChangeRequest.idChiNhanh, TopicMqtt);
+            doc["clientid"] = clientId;
+            
+            // Build message object (NOT array)
+            JsonObject message = doc.createNestedObject("message");
+            message["Key"] = "UpdatePrice";
+            
+            JsonObject item = message.createNestedObject("item");
             item["IDChiNhanh"] = lastPriceChangeRequest.idChiNhanh;
             item["IdDevice"] = lastPriceChangeRequest.idDevice;
             item["UnitPrice"] = lastPriceChangeRequest.unitPrice;
@@ -1260,51 +1406,25 @@ void readRS485Data(byte *buffer)
             
             if (mqttClient.publish(responseTopic, jsonString.c_str()))
             {
-              Serial.printf("[RS485 READ] ✓ Published Complete to %s: %s\n", responseTopic, jsonString.c_str());
+              Serial.printf("[RS485 READ] ✓ Published FinishPrice to %s: %s\n", responseTopic, jsonString.c_str());
             }
             else
             {
-              Serial.printf("[RS485 READ] ✗ Failed to publish Complete to %s\n", responseTopic);
+              Serial.printf("[RS485 READ] ✗ Failed to publish FinishPrice to %s\n", responseTopic);
             }
           }
         }
         else if (status == 'E')
         {
           Serial.printf("[RS485 READ] ✗ ERROR - DeviceID=%d rejected price update (KPL returned 'E')\n", deviceId);
-          
-          // Publish Error response to MQTT
-          if (mqttClient.connected() && deviceId == lastPriceChangeRequest.deviceId)
-          {
-            char responseTopic[100];
-            snprintf(responseTopic, sizeof(responseTopic), "%s/ChangePrice", lastPriceChangeRequest.idChiNhanh);
-            
-            DynamicJsonDocument doc(512);
-            JsonArray array = doc.to<JsonArray>();
-            JsonObject entry = array.createNestedObject();
-            entry["Key"] = "Error";
-            
-            JsonObject item = entry.createNestedObject("item");
-            item["IDChiNhanh"] = lastPriceChangeRequest.idChiNhanh;
-            item["IdDevice"] = lastPriceChangeRequest.idDevice;
-            item["UnitPrice"] = lastPriceChangeRequest.unitPrice;
-            
-            String jsonString;
-            serializeJson(doc, jsonString);
-            
-            if (mqttClient.publish(responseTopic, jsonString.c_str()))
-            {
-              Serial.printf("[RS485 READ] ✓ Published Error to %s: %s\n", responseTopic, jsonString.c_str());
-            }
-            else
-            {
-              Serial.printf("[RS485 READ] ✗ Failed to publish Error to %s\n", responseTopic);
-            }
-          }
+          Serial.printf("[RS485 READ] ⚠️ Error response ignored - NOT publishing to MQTT\n");
+          // Do NOT publish Error response to MQTT - only Success is published
         }
         else
         {
           Serial.printf("[RS485 READ] ✗ UNKNOWN STATUS - DeviceID=%d, Status='%c' (0x%02X)\n", 
                         deviceId, status, status);
+          Serial.printf("[RS485 READ] ⚠️ Unknown status ignored - NOT publishing to MQTT\n");
         }
       }
       else
@@ -1391,8 +1511,22 @@ void readRS485Data(byte *buffer)
   // Case 5: Invalid first byte - clear one byte and try again
   if (firstByte != 1 && firstByte != 7 && firstByte != 9)
   {
-    Serial.printf("[RS485 READ] Unknown first byte: 0x%02X, discarding...\n", firstByte);
+    // Reduce spam by only logging every 10th invalid byte
+    static int invalidByteCount = 0;
+    invalidByteCount++;
+    
+    if (invalidByteCount % 10 == 0)
+    {
+      Serial.printf("[RS485 READ] Unknown first byte: 0x%02X (count: %d), discarding...\n", firstByte, invalidByteCount);
+    }
+    
     Serial2.read(); // Discard invalid byte
+    
+    // Reset counter every 100 invalid bytes to prevent overflow
+    if (invalidByteCount >= 100)
+    {
+      invalidByteCount = 0;
+    }
   }
 }
 

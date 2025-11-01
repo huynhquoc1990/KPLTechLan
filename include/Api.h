@@ -104,8 +104,8 @@ void callAPIGetSettingsMqtt(Settings *settings, SemaphoreHandle_t flashMutex)
     Serial.println("Khong ket noi duoc internet");
   }
 
-  Serial.println("MqttServer: " + String(settings->MqttServer));
-  Serial.println("PortMqtt: " + String(settings->PortMqtt));
+  // Serial.println("MqttServer: " + String(settings->MqttServer));
+  // Serial.println("PortMqtt: " + String(settings->PortMqtt));
   // vTaskDelete(NULL);
 }
 
