@@ -89,6 +89,7 @@ static char topicChange[64];
 static char topicOTA[64];             // topic for OTA firmware update
 static char topicUpdatePrice[64];     // topic for changing price
 static char topicGetPrice[64];        // topic for requesting current prices
+static char topicRequestLog[64];      // topic for requesting logs from Flash
 
 // FreeRTOS objects
 static QueueHandle_t mqttQueue = NULL;
