@@ -35,6 +35,8 @@ void ganLog(byte *buffer, PumpLog &log) {
   log.giay = buffer[28];
   log.checksum = buffer[29];
   log.send3 = buffer[30];
+  log.mqttSent = 0;      // Default to pending/failed
+  log.mqttSentTime = 0;  // Default to 0
 }
 
 // Hàm chuyển đổi cấu trúc PumpLog sang JSON

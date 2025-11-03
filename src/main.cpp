@@ -1337,7 +1337,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     snprintf(responseTopic, sizeof(responseTopic), "%s/ResponsePrice", companyInfo.Mst);
     
     // Create JSON response with all nozzle prices
-    DynamicJsonDocument doc(1024);
+    DynamicJsonDocument doc(2048); // Increased size for 10 nozzles with all fields
     doc["topic"] = companyInfo.CompanyId;
     doc["clientid"] = TopicMqtt;
     doc["timestamp"] = currentPrices.lastUpdate;
@@ -1391,6 +1391,7 @@ void sendMQTTData(const PumpLog &log)
 
   int retryCount = 0;
   const int maxRetries = 3;
+  bool mqttSuccess = false;
   esp_task_wdt_reset();
 
   while (retryCount < maxRetries)
@@ -1398,6 +1399,7 @@ void sendMQTTData(const PumpLog &log)
     if (mqttClient.publish(fullTopic, jsonData.c_str()))
     {
       Serial.println("MQTT data sent successfully");
+      mqttSuccess = true;
       break;
     }
     else
@@ -1410,10 +1412,57 @@ void sendMQTTData(const PumpLog &log)
     yield();
   }
 
-  if (retryCount == maxRetries)
+  // Prepare updated log with MQTT status
+  PumpLog updatedLog = log;
+  updatedLog.mqttSentTime = time(NULL); // Timestamp from Google NTP (success or failure)
+  
+  if (mqttSuccess)
   {
+    updatedLog.mqttSent = 1; // Success
+    Serial.printf("✓ Log %d: MQTT sent successfully at %ld\n", 
+                  updatedLog.viTriLogData, updatedLog.mqttSentTime);
+  }
+  else
+  {
+    updatedLog.mqttSent = 0; // Failed
     Serial.println("ERROR: MQTT send failed after maximum retries");
+    Serial.printf("✗ Log %d: MQTT failed at %ld\n", 
+                  updatedLog.viTriLogData, updatedLog.mqttSentTime);
     setSystemStatus("ERROR", "MQTT send failed after " + String(maxRetries) + " retries");
+  }
+
+  // Save to Flash at position viTriLogData (1-5000)
+  if (updatedLog.viTriLogData >= 1 && updatedLog.viTriLogData <= MAX_LOGS)
+  {
+    if (xSemaphoreTake(flashMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+      File dataFile = LittleFS.open(FLASH_DATA_FILE, "r+");
+      if (!dataFile) {
+        dataFile = LittleFS.open(FLASH_DATA_FILE, "w");
+      }
+      
+      if (dataFile)
+      {
+        uint32_t offset = (updatedLog.viTriLogData - 1) * sizeof(PumpLog);
+        dataFile.seek(offset, SeekSet);
+        dataFile.write((const uint8_t*)&updatedLog, sizeof(PumpLog));
+        dataFile.close();
+        Serial.printf("💾 Log %d saved to Flash (mqttSent=%d)\n", updatedLog.viTriLogData, updatedLog.mqttSent);
+      }
+      else
+      {
+        Serial.println("ERROR: Failed to open Flash file for log save");
+      }
+      xSemaphoreGive(flashMutex);
+    }
+    else
+    {
+      Serial.printf("⚠️ Flash mutex timeout for Log %d\n", updatedLog.viTriLogData);
+    }
+  }
+  else
+  {
+    Serial.printf("ERROR: Invalid viTriLogData=%d\n", updatedLog.viTriLogData);
   }
 }
 
