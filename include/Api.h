@@ -7,6 +7,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <freertos/queue.h>
+#include <esp_task_wdt.h> // CRITICAL: Added for WDT support
 #include "Credentials.h"
 
 /// @brief Hàm lấy thông tin từ server và kiểm tra nội dung có thay đổi trong flash hay không? Nếu có lưu mới
@@ -194,6 +195,10 @@ void callAPIServerGetLogLoss(void *param){
   GetIdLogLoss *msg = params->msg;
   QueueHandle_t LogIdLossQueue = params->logIdLossQueue;
 
+  // CRITICAL: Add this task to WDT monitoring
+  esp_task_wdt_add(NULL);
+  esp_task_wdt_reset();
+
   // Serial.printf("id: %s \n", msg.Idvoi);
   // Serial.printf("Today: %s \n", msg.Today);
   // Serial.printf("Request_Code: %s\n", msg.Request_Code);
@@ -224,6 +229,9 @@ void callAPIServerGetLogLoss(void *param){
     Serial.print("json:" + json +"\n");
     // Send the POST request
     int httpResponseCode = http.POST(json.c_str());
+
+    // CRITICAL: Reset WDT after potentially long HTTP request
+    esp_task_wdt_reset();
 
     // show nội dụng gởi về từ http
     String response = http.getString();
@@ -257,12 +265,15 @@ void callAPIServerGetLogLoss(void *param){
               if (counter > 0) {
                 DtaLogLoss dt;
                 dt.Logid = static_cast<int>(counter);
-                Serial.println("Counter Loss: " + String(counter));
-                if (xQueueSend(LogIdLossQueue, &dt, pdMS_TO_TICKS(50)) != pdPASS) {
+                // Serial.println("Counter Loss: " + String(counter));
+                if (xQueueSend(LogIdLossQueue, &dt, pdMS_TO_TICKS(100)) != pdPASS) {
                   Serial.println("IdLog node add");
                 }
-                // avoid starving other tasks
-                if ((++sent % 10) == 0) vTaskDelay(pdMS_TO_TICKS(1));
+                // avoid starving other tasks by resetting WDT and yielding
+                if ((++sent % 50) == 0) {
+                  esp_task_wdt_reset();
+                  vTaskDelay(pdMS_TO_TICKS(1)); 
+                }
               }
             }
           } else {
@@ -296,6 +307,9 @@ void callAPIServerGetLogLoss(void *param){
    // Giải phóng bộ nhớ
   delete msg;
   delete params;
+  
+  // CRITICAL: Remove task from WDT before deleting it
+  esp_task_wdt_delete(NULL);
   vTaskDelete(NULL);
 }
 #endif // API_H

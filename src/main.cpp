@@ -13,6 +13,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <Update.h>
+#include <esp_partition.h> // CRITICAL: Added for partition info
 
 // ============================================================================
 // DEBUG LOGGING MACROS
@@ -73,8 +74,11 @@ static bool mqttTopicsConfigured = false;
 static bool mqttSubscribed = false; // Track subscription state
 static unsigned long counterReset = 0;
 static unsigned long lastHeapCheck = 0;
-static String systemStatus = "OK";
-static String lastError = "";
+static char systemStatus[32] = "OK";
+static char lastError[128] = "";
+
+// CRITICAL: Global flag to disable flash writes on old partition
+static bool g_flashSaveEnabled = true;
 
 // MQTT topics - tối ưu memory allocation
 static char fullTopic[64];
@@ -139,7 +143,7 @@ void systemCheck();
 void handleResetButton();
 void checkHeap();
 void setupTime();
-void setSystemStatus(const String &status, const String &error = "");
+void setSystemStatus(const char* status, const char* error = "");
 void adjustThermals();
 
 // MQTT functions
@@ -161,6 +165,8 @@ void readMacEsp();
 // void performOTAUpdate(const char* firmwareURL);
 void performOTAUpdateViaAPI(const String& apiEndpoint, const String& ftpUrl);
 void sendPriceChangeCommand(const PriceChangeRequest &request);
+void printPartitionInfo(); // CRITICAL: Added forward declaration
+bool validateMacWithServer(const char* macAddress); // SECURITY: MAC validation
 
 // ============================================================================
 // MAIN SETUP & LOOP
@@ -173,14 +179,17 @@ unsigned long checkLogSend = 0;
 void setup()
 {
   Serial.begin(115200);
-  delay(1000);
-  Serial.println("\n\n===========================================");
-  Serial.println("=== KPL Gas Device Starting ===");
-  
-  // Check reset reason
-  esp_reset_reason_t reset_reason = esp_reset_reason();
-  Serial.printf("Reset reason: %d ", reset_reason);
-  switch(reset_reason)
+  while (!Serial); // Wait for serial connection
+
+  Serial.println("\n\n=== KPL Techlan Device Booting ===");
+
+  // CRITICAL: Print partition info right at the start
+  printPartitionInfo();
+
+  // Read reset reason
+  esp_reset_reason_t reason = esp_reset_reason();
+  Serial.printf("Reset reason: %d - ", reason);
+  switch(reason)
   {
     case ESP_RST_UNKNOWN:   Serial.println("(UNKNOWN)"); break;
     case ESP_RST_POWERON:   Serial.println("(POWER ON)"); break;
@@ -231,6 +240,27 @@ void readMacEsp()
           (uint8_t)(chipid >> 40), (uint8_t)(chipid >> 32), (uint8_t)(chipid >> 24),
           (uint8_t)(chipid >> 16), (uint8_t)(chipid >> 8), (uint8_t)chipid);
   Serial.println("Mac: " + String(macStr));
+  
+  // SECURITY: Validate MAC with server
+  if (!validateMacWithServer(macStr)) {
+    Serial.println("❌ DEVICE NOT AUTHORIZED!");
+    Serial.println("MAC address not found in authorized devices list.");
+    Serial.println("Contact KPL Tech support: 0xxx-xxx-xxx");
+    
+    // Brick device - infinite loop
+    while (true) {
+      digitalWrite(OUT1, HIGH);
+      digitalWrite(OUT2, HIGH);
+      delay(500);
+      digitalWrite(OUT1, LOW);
+      digitalWrite(OUT2, LOW);
+      delay(500);
+      Serial.println("UNAUTHORIZED DEVICE - Contact support");
+      delay(30000);  // Print every 30 seconds
+    }
+  }
+  
+  Serial.println("✓ Device authorized by server");
 
   // call api để check mac có trong hệ thống hay không, sử dụng Phương thức Poss
 
@@ -307,13 +337,13 @@ void systemInit()
   Serial2.begin(RS485BaudRate, SERIAL_8N1, RX_PIN, TX_PIN);
 
   // Initialize FreeRTOS objects
-  mqttQueue = xQueueCreate(10, sizeof(PumpLog));
-  logIdLossQueue = xQueueCreate(50, sizeof(DtaLogLoss));
-  priceChangeQueue = xQueueCreate(10, sizeof(PriceChangeRequest));  // Queue for price changes
   flashMutex = xSemaphoreCreateMutex();
   systemMutex = xSemaphoreCreateMutex();
+  mqttQueue = xQueueCreate(300, sizeof(PumpLog)); // Increased from 5
+  logIdLossQueue = xQueueCreate(500, sizeof(DtaLogLoss)); // CRITICAL: Increased from 50 to 500
+  priceChangeQueue = xQueueCreate(10, sizeof(PriceChangeRequest));
 
-  if (!mqttQueue || !logIdLossQueue || !priceChangeQueue || !flashMutex || !systemMutex)
+  if (flashMutex == NULL || systemMutex == NULL || mqttQueue == NULL || logIdLossQueue == NULL || priceChangeQueue == NULL)
   {
     Serial.println("ERROR: Failed to create FreeRTOS objects!");
     setSystemStatus("ERROR", "Failed to create FreeRTOS objects");
@@ -350,7 +380,7 @@ void systemInit()
 
   // Initialize MQTT - will be updated from API settings
   mqttClient.setServer(mqttServer, 1883); // Default server, will be updated from API
-  mqttClient.setBufferSize(1024); // Increase buffer size from default 128
+  mqttClient.setBufferSize(24576); // 24KB buffer for compressed log responses (up to 200 logs)
   mqttClient.setCallback(mqttCallback);
   
   Serial.printf("MQTT client initialized - Buffer size: %d\n", mqttClient.getBufferSize());
@@ -370,6 +400,7 @@ void systemInit()
 void systemCheck()
 {
   static unsigned long lastCheck = 0;
+  static unsigned long lastQueueCheck = 0;
   unsigned long now = millis();
 
   // Check every 10 seconds
@@ -383,11 +414,80 @@ void systemCheck()
     // Check heap memory
     checkHeap();
 
-    checkLogSend++;
-    if (checkLogSend >= 360)
+    // Queue overflow monitoring (every 30 seconds)
+    if (now - lastQueueCheck >= 30000)
     {
+      lastQueueCheck = now;
+      
+      UBaseType_t mqttQueueCount = uxQueueMessagesWaiting(mqttQueue);
+      if (mqttQueueCount > 8) // 80% of 10
+      {
+        Serial.printf("⚠️ MQTT queue nearly full: %d/10\n", mqttQueueCount);
+        setSystemStatus("WARNING", "MQTT queue overload");
+      }
+      
+      UBaseType_t logLossQueueCount = uxQueueMessagesWaiting(logIdLossQueue);
+      if (logLossQueueCount > 40) // 80% of 50
+      {
+        Serial.printf("⚠️ LogLoss queue nearly full: %d/50\n", logLossQueueCount);
+        setSystemStatus("WARNING", "LogLoss queue overload");
+      }
+      
+      UBaseType_t priceQueueCount = uxQueueMessagesWaiting(priceChangeQueue);
+      if (priceQueueCount > 8) // 80% of 10
+      {
+        Serial.printf("⚠️ Price change queue nearly full: %d/10\n", priceQueueCount);
+        setSystemStatus("WARNING", "Price queue overload");
+      }
+    }
+
+    // Safe auto-restart after 60 minutes of no logs
+    checkLogSend++;
+    if (checkLogSend >= 360) // 360 * 10s = 3600s = 60 minutes
+    {
+      Serial.printf("No logs received for 60 minutes (%lu checks) - initiating safe restart...\n", checkLogSend);
+      
+      // Check if safe to restart
+      if (Update.isRunning()) {
+        Serial.println("⚠️ OTA in progress - postponing restart");
+        checkLogSend = 350; // Retry in 100 seconds
+        return;
+      }
+      
+      if (uxQueueMessagesWaiting(mqttQueue) > 0) {
+        Serial.printf("⚠️ MQTT queue has %d pending logs - postponing restart\n", 
+                      uxQueueMessagesWaiting(mqttQueue));
+        checkLogSend = 350; // Retry in 100 seconds
+        return;
+      }
+      
+      // Additional check: Don't restart if logIdLossQueue has pending logs
+      if (uxQueueMessagesWaiting(logIdLossQueue) > 0) {
+        Serial.printf("⚠️ LogLoss queue has %d pending requests - postponing restart\n", 
+                      uxQueueMessagesWaiting(logIdLossQueue));
+        checkLogSend = 350; // Retry in 100 seconds
+        return;
+      }
+      
+      if (xSemaphoreTake(flashMutex, 0) != pdTRUE) {
+        Serial.println("⚠️ Flash is busy - postponing restart");
+        checkLogSend = 350; // Retry in 100 seconds
+        return;
+      }
+      xSemaphoreGive(flashMutex);
+      
+      // Save counter to Flash before restart
+      Serial.println("✓ System is safe to restart - saving state...");
+      counterReset++;
+      if (writeResetCountToFlash(flashMutex, counterReset)) {
+        Serial.printf("✓ Counter saved: %lu\n", counterReset);
+      } else {
+        Serial.println("⚠️ Failed to save counter, restarting anyway...");
+      }
+      
+      Serial.println("✓ Restarting in 3 seconds...");
+      delay(3000);
       ESP.restart();
-      Serial.println("Check log send: " + String(checkLogSend));
     }
 
     // Adjust thermals based on die temperature
@@ -432,12 +532,14 @@ void checkHeap()
   if (freeHeap < 10000)
   {
     LOG_ERROR("WARNING: Low memory!");
-    setSystemStatus("WARNING", "Low memory: " + String(freeHeap) + " bytes");
+    char errorMsg[64];
+    snprintf(errorMsg, sizeof(errorMsg), "Low memory: %u bytes", freeHeap);
+    setSystemStatus("WARNING", errorMsg);
   }
-  else if (systemStatus == "WARNING" && lastError.indexOf("Low memory") >= 0)
+  else if (strcmp(systemStatus, "WARNING") == 0 && strstr(lastError, "Low memory") != NULL)
   {
     // Clear memory warning if heap is back to normal
-    setSystemStatus("OK");
+    setSystemStatus("OK", "");
   }
 }
 
@@ -479,14 +581,21 @@ void adjustThermals()
   }
 }
 
-void setSystemStatus(const String &status, const String &error)
+void setSystemStatus(const char* status, const char* error)
 {
-  systemStatus = status;
-  lastError = error;
+  strncpy(systemStatus, status, sizeof(systemStatus) - 1);
+  systemStatus[sizeof(systemStatus) - 1] = '\0';
+  
+  if (error && strlen(error) > 0) {
+    strncpy(lastError, error, sizeof(lastError) - 1);
+    lastError[sizeof(lastError) - 1] = '\0';
+  } else {
+    lastError[0] = '\0';
+  }
 
-  if (status != "OK")
+  if (strcmp(status, "OK") != 0)
   {
-    Serial.printf("[STATUS] %s: %s\n", status.c_str(), error.c_str());
+    Serial.printf("[STATUS] %s: %s\n", status, error ? error : "");
     // send status to mqtt
     if (mqttClient.connected())
     {
@@ -596,15 +705,50 @@ void wifiTask(void *parameter)
   }
 
   // Nếu có config, tiếp tục vòng lặp kết nối bình thường
+  // CRITICAL: Initial delay after boot to give router time to start
+  // This handles the case when both device and router lose power simultaneously
+  static bool firstBoot = true;
+  if (firstBoot) {
+    Serial.println("[WiFi] Initial boot delay: waiting 5 seconds for router to start...");
+    for (int i = 0; i < 5; i++) {
+      esp_task_wdt_reset();
+      vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    firstBoot = false;
+  }
+
   while (true)
   {
     esp_task_wdt_reset();
     if (WiFi.status() != WL_CONNECTED)
     {
-      Serial.println("Attempting to connect to saved WiFi...");
+      // Check if router is available before attempting connection
+      // This prevents connection attempts when router is still booting
+      Serial.println("[WiFi] Checking if router is available...");
+      bool routerAvailable = wifiManager->isRouterAvailable();
+      
+      if (!routerAvailable) {
+        Serial.println("[WiFi] Router not detected. Waiting before retry...");
+        // Router not available - wait and retry scan
+        // Don't turn WiFi completely off, just wait and scan again
+        for (int i = 0; i < 5; i++) { // Wait 5 seconds
+          esp_task_wdt_reset();
+          vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        continue; // Retry router check
+      }
+      
+      Serial.println("[WiFi] Router detected. Attempting to connect...");
+      static uint32_t cooldownSeconds = 10; // exponential backoff, capped
+      static uint32_t failedAttempts = 0;
+      
       if (wifiManager->connectToWiFi())
       {
         Serial.println("WiFi connected successfully.");
+        // Reset backoff counters on successful connection
+        cooldownSeconds = 10;
+        failedAttempts = 0;
+        
         setupTime();
         
         // Only setup MQTT topics if not already configured
@@ -623,10 +767,12 @@ void wifiTask(void *parameter)
       }
       else
       {
-        static uint32_t cooldownSeconds = 10; // exponential backoff, capped
-        Serial.printf("WiFi connection failed, cooling radio for %lus...\n", cooldownSeconds);
-        setSystemStatus("ERROR", "WiFi connection failed");
+        failedAttempts++;
         
+        Serial.printf("[WiFi] Connection failed (attempt %d), cooling radio for %lus...\n", 
+                     failedAttempts, cooldownSeconds);
+        setSystemStatus("ERROR", "WiFi connection failed");
+
         // Reset MQTT state when WiFi fails
         mqttTopicsConfigured = false;
         statusConnected = false;
@@ -647,21 +793,39 @@ void wifiTask(void *parameter)
           Serial.println("MQTT topics unsubscribed and disconnected");
         }
 
-        // Turn radio off during cooldown to reduce temperature
+        // IMPROVED: During cooldown, periodically check if router becomes available
+        // Instead of turning WiFi completely off, we keep it in STA mode and scan
         WiFi.disconnect(true, true);
-        WiFi.mode(WIFI_OFF);
+        WiFi.mode(WIFI_STA); // Keep in STA mode (not WIFI_OFF)
+        WiFi.setSleep(true);
         setCpuFrequencyMhz(160);
+        
+        // During cooldown, check router availability every 3 seconds
+        // If router becomes available, reset backoff and try immediately
         for (uint32_t i = 0; i < cooldownSeconds; i++) {
           esp_task_wdt_reset();
+          
+          // Check router every 3 seconds during cooldown
+          if (i % 3 == 0 && i > 0) {
+            Serial.printf("[WiFi] Cooldown: checking router availability (%d/%d)...\n", 
+                         i, cooldownSeconds);
+            if (wifiManager->isRouterAvailable()) {
+              Serial.println("[WiFi] Router detected during cooldown! Resetting backoff and retrying...");
+              cooldownSeconds = 5; // Reset to minimum
+              failedAttempts = 0;
+              setCpuFrequencyMhz(240);
+              break; // Exit cooldown loop and retry connection
+            }
+          }
+          
           vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
         // Restore for next attempt
-        WiFi.mode(WIFI_STA);
         WiFi.setSleep(true);
         setCpuFrequencyMhz(240);
 
-        // Increase backoff up to 60s
+        // Increase backoff up to 60s (only if connection still failed)
         if (cooldownSeconds < 60) {
           cooldownSeconds = cooldownSeconds < 30 ? cooldownSeconds * 2 : 60;
         }
@@ -697,10 +861,13 @@ void wifiTask(void *parameter)
 void mqttTask(void *parameter)
 {
   Serial.println("MQTT task started");
-  // esp_task_wdt_add(NULL);
+  // esp_task_wdt_add(NULL); // CRITICAL: Add task to WDT monitoring
 
   while (true)
   {
+    // CRITICAL: Feed WDT at start of each cycle to prevent timeout
+    esp_task_wdt_reset();
+    
     if (WiFi.status() == WL_CONNECTED)
     {
       // Wait for MQTT topics to be configured before attempting connection
@@ -715,6 +882,7 @@ void mqttTask(void *parameter)
       if (!mqttClient.connected())
       {
         connectMQTT();
+        esp_task_wdt_reset(); // Reset after potentially long connection attempt
       }
       else
       {
@@ -722,7 +890,9 @@ void mqttTask(void *parameter)
         PumpLog log;
         if (xQueueReceive(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
         {
+          Serial.printf("Processing log %d\n", log.viTriLogData);
           sendMQTTData(log);
+          esp_task_wdt_reset(); // Reset after processing each log
         }
         
         // Additional loop call to ensure callback processing
@@ -743,6 +913,7 @@ void mqttTask(void *parameter)
         mqttClient.unsubscribe(topicOTA);
         mqttClient.unsubscribe(topicUpdatePrice);
         mqttClient.unsubscribe(topicGetPrice);
+        mqttClient.unsubscribe(topicRequestLog);
         mqttClient.disconnect();
         mqttSubscribed = false;
         Serial.println("MQTT cleanup completed");
@@ -753,7 +924,7 @@ void mqttTask(void *parameter)
     systemCheck();
 
     vTaskDelay(pdMS_TO_TICKS(100));
-    // esp_task_wdt_reset();
+    // esp_task_wdt_reset(); // Reset at end of cycle
     yield();
   }
 }
@@ -852,7 +1023,9 @@ void setupTime()
   else
   {
     Serial.println("Failed to sync time");
-    setSystemStatus("WARNING", "Failed to synchronize time after " + String(maxRetries) + " attempts");
+    char errorMsg[64];
+    snprintf(errorMsg, sizeof(errorMsg), "Failed to sync time after %d attempts", maxRetries);
+    setSystemStatus("WARNING", errorMsg);
   }
 }
 
@@ -901,6 +1074,7 @@ void setupMQTTTopics()
   
   snprintf(topicUpdatePrice, sizeof(topicUpdatePrice), "%s%s", companyInfo.CompanyId, TopicUpdatePrice);
   snprintf(topicGetPrice, sizeof(topicGetPrice), "%s%s", companyInfo.Mst, TopicGetPrice);
+  snprintf(topicRequestLog, sizeof(topicRequestLog), "%s%s", companyInfo.CompanyId, TopicRequestLog);
   // snprintf(topicUpdatePrice, sizeof(topicUpdatePrice), "%s%s%s", companyInfo.CompanyId, TopicUpdatePrice);
 
   Serial.printf("MQTT topics configured - Company ID: %s (MST: %s)\n", companyInfo.CompanyId, companyInfo.Mst);
@@ -919,6 +1093,7 @@ void setupMQTTTopics()
     bool sub6 = mqttClient.subscribe(topicOTA);
     bool sub7 = mqttClient.subscribe(topicUpdatePrice);
     bool sub8 = mqttClient.subscribe(topicGetPrice);
+    bool sub9 = mqttClient.subscribe(topicRequestLog);
 
     Serial.printf("Subscription results:\n");
     Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
@@ -929,10 +1104,11 @@ void setupMQTTTopics()
     Serial.printf("  OTA (%s): %s\n", topicOTA, sub6 ? "SUCCESS" : "FAILED");
     Serial.printf("  UpdatePrice (%s): %s\n", topicUpdatePrice, sub7 ? "SUCCESS" : "FAILED");
     Serial.printf("  GetPrice (%s): %s\n", topicGetPrice, sub8 ? "SUCCESS" : "FAILED");
+    Serial.printf("  RequestLog (%s): %s\n", topicRequestLog, sub9 ? "SUCCESS" : "FAILED");
     Serial.println("=== SUBSCRIPTION COMPLETE ===");
     
     // Set subscription flag
-    mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7 && sub8);
+    mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7 && sub8 && sub9);
     Serial.printf("MQTT subscription state: %s\n", mqttSubscribed ? "SUBSCRIBED" : "PARTIAL_FAILURE");
       }
       else
@@ -943,6 +1119,8 @@ void setupMQTTTopics()
 
 void connectMQTT()
 {
+  static uint32_t mqttBackoffSeconds = 5; // Exponential backoff for MQTT reconnection
+  
   Serial.println("Connecting to MQTT...");
   
   // Set connection timeout
@@ -953,6 +1131,7 @@ void connectMQTT()
   {
     Serial.println("MQTT connected");
     statusConnected = true;
+    mqttBackoffSeconds = 5; // Reset backoff on successful connection
     setSystemStatus("OK", ""); // Clear any MQTT connection errors
 
     // Subscribe to topics if they have been configured
@@ -968,6 +1147,7 @@ void connectMQTT()
       bool sub6 = mqttClient.subscribe(topicOTA);
       bool sub7 = mqttClient.subscribe(topicUpdatePrice);
       bool sub8 = mqttClient.subscribe(topicGetPrice);
+      bool sub9 = mqttClient.subscribe(topicRequestLog);
 
       Serial.printf("Re-subscription results:\n");
       Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
@@ -978,10 +1158,11 @@ void connectMQTT()
       Serial.printf("  OTA (%s): %s\n", topicOTA, sub6 ? "SUCCESS" : "FAILED");
       Serial.printf("  UpdatePrice (%s): %s\n", topicUpdatePrice, sub7 ? "SUCCESS" : "FAILED");
       Serial.printf("  GetPrice (%s): %s\n", topicGetPrice, sub8 ? "SUCCESS" : "FAILED");
+      Serial.printf("  RequestLog (%s): %s\n", topicRequestLog, sub9 ? "SUCCESS" : "FAILED");
       Serial.println("=== RE-SUBSCRIPTION COMPLETE ===");
       
       // Set subscription flag
-      mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7 && sub8);
+      mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7 && sub8 && sub9);
       Serial.printf("MQTT re-subscription state: %s\n", mqttSubscribed ? "SUBSCRIBED" : "PARTIAL_FAILURE");
       
       // Publish saved prices from Flash after successful MQTT connection
@@ -990,12 +1171,21 @@ void connectMQTT()
                               companyInfo.Mst, TopicMqtt);
       Serial.println("=== SAVED PRICES PUBLISHED ===\n");
     }
-  }
-  else
-  {
+        }
+        else
+        {
     Serial.printf("MQTT connection failed. State: %d\n", mqttClient.state());
-    setSystemStatus("ERROR", "MQTT connection failed - state: " + String(mqttClient.state()));
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    char errorMsg[64];
+    snprintf(errorMsg, sizeof(errorMsg), "MQTT failed - state: %d", mqttClient.state());
+    setSystemStatus("ERROR", errorMsg);
+    
+    // Exponential backoff: 5s → 10s → 20s → 40s → 80s → 160s → max 300s
+    Serial.printf("MQTT connection failed - cooling down for %lus...\n", mqttBackoffSeconds);
+    vTaskDelay(pdMS_TO_TICKS(mqttBackoffSeconds * 1000));
+    
+    if (mqttBackoffSeconds < 300) {
+      mqttBackoffSeconds = mqttBackoffSeconds < 150 ? mqttBackoffSeconds * 2 : 300;
+    }
   }
 }
 
@@ -1019,6 +1209,12 @@ void sendDeviceStatus()
           (uint8_t)(chipid >> 16), (uint8_t)(chipid >> 8), (uint8_t)chipid);
   // Serial.println("Mac: " + String(macStr));
   doc["macAddress"] = String(macStr);
+  
+  // CRITICAL: Add partition warning flag
+  doc["oldPartition"] = !g_flashSaveEnabled;
+  if (!g_flashSaveEnabled) {
+    doc["warning"] = "OLD_PARTITION_FLASH_REQUIRED";
+  }
 
   String jsonString;
   serializeJson(doc, jsonString);
@@ -1106,13 +1302,25 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   if (strncmp(topic, topicErrorPrefix, strlen(topicErrorPrefix)) == 0)
   {
     Serial.println("Error topic received - parsing payload...");
+    Serial.printf("Topic: %s\n", topic);
+    Serial.printf("Payload length: %d\n", length);
+    Serial.print("Payload: ");
+    for (unsigned int i = 0; i < length && i < 200; i++) {
+      Serial.print((char)payload[i]);
+    }
+    Serial.println();
+    
     parsePayload_IdLogLoss(payload, length, &receivedMessage, &companyInfo);
     Serial.printf("Parsed Idvoi: %s, Expected: %s\n", receivedMessage.Idvoi, TopicMqtt);
 
     if (strcmp(receivedMessage.Idvoi, TopicMqtt) == 0)
     {
       Serial.println("Idvoi matches - processing log loss...");
-        if (uxQueueMessagesWaiting(logIdLossQueue) == 0)
+      
+      UBaseType_t queueSize = uxQueueMessagesWaiting(logIdLossQueue);
+      Serial.printf("LogIdLossQueue size: %d\n", queueSize);
+      
+        if (queueSize == 0)
         {
           TaskParams *taskParams = new TaskParams;
         taskParams->msg = new GetIdLogLoss(receivedMessage);
@@ -1130,7 +1338,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         }
         
         // Reduce stack size from 40960 to 16384
-        if (xTaskCreate(callAPIServerGetLogLoss, "GetData", 16384, taskParams, 3, NULL) != pdPASS)
+        if (xTaskCreate(callAPIServerGetLogLoss, "GetData", 32768, taskParams, 3, NULL) != pdPASS)
         {
           Serial.println("Failed to create log loss task");
             delete taskParams->msg;
@@ -1311,7 +1519,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     Serial.printf("[MQTT] RS485 task will process %d price change(s)\n", queued);
     
     if (queued > 0) {
-      setSystemStatus("OK", String("Queued ") + String(queued) + " price change(s)");
+      char statusMsg[64];
+      snprintf(statusMsg, sizeof(statusMsg), "Queued %d price change(s)", queued);
+      setSystemStatus("OK", statusMsg);
     } else {
       setSystemStatus("WARNING", "No price changes queued");
     }
@@ -1382,6 +1592,199 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       setSystemStatus("ERROR", "Failed to publish price data");
     }
   }
+
+  // Handle RequestLog command - Request specific logs from Flash
+  if (strcmp(topic, topicRequestLog) == 0)
+  {
+    DEBUG_PRINTLN("[MQTT] RequestLog command received - parsing payload...");
+    
+    // Parse JSON payload: {"Mst": "...", "IdDevice": "...", "BeginLog": 1, "Numslog": 10}
+    DynamicJsonDocument doc(512);
+    DeserializationError error = deserializeJson(doc, payload, length);
+    
+    if (error)
+    {
+      Serial.printf("[MQTT] RequestLog: JSON parse error: %s\n", error.c_str());
+      setSystemStatus("ERROR", "RequestLog: Invalid JSON payload");
+      return;
+    }
+    
+    // Extract required fields
+    const char* mst = doc["Mst"] | "";
+    const char* idDevice = doc["IdDevice"] | "";
+    uint16_t beginLog = doc["BeginLog"] | 0;
+    uint16_t numsLog = doc["Numslog"] | 0;
+    
+    // Validate MST and IdDevice
+    if (strlen(mst) == 0 || strcmp(mst, companyInfo.Mst) != 0)
+    {
+      DEBUG_PRINTF("[MQTT] RequestLog: MST mismatch (received=%s, expected=%s), ignoring...\n", mst, companyInfo.Mst);
+      return;
+    }
+    
+    if (strlen(idDevice) == 0 || strcmp(idDevice, TopicMqtt) != 0)
+    {
+      DEBUG_PRINTF("[MQTT] RequestLog: IdDevice mismatch (received=%s, expected=%s), ignoring...\n", idDevice, TopicMqtt);
+      return;
+    }
+    
+    // Validate BeginLog and Numslog
+    if (beginLog < 1 || beginLog > MAX_LOGS)
+    {
+      DEBUG_PRINTF("[MQTT] RequestLog: Invalid BeginLog=%d (must be 1-%d)\n", beginLog, MAX_LOGS);
+      setSystemStatus("ERROR", "RequestLog: Invalid BeginLog");
+      return;
+    }
+    
+    if (numsLog < 1 || numsLog > 200)
+    {
+      DEBUG_PRINTF("[MQTT] RequestLog: Invalid Numslog=%d (must be 1-200)\n", numsLog);
+      setSystemStatus("ERROR", "RequestLog: Invalid Numslog");
+      return;
+    }
+    
+    DEBUG_PRINTF("[MQTT] RequestLog: MST=%s, IdDevice=%s, BeginLog=%d, Numslog=%d\n", 
+                  mst, idDevice, beginLog, numsLog);
+    
+    // Build response topic: {Mst}/ResponseLog
+    char responseTopic[64];
+    snprintf(responseTopic, sizeof(responseTopic), "%s/ResponseLog", companyInfo.Mst);
+    
+    // Calculate range
+    uint16_t endLog = beginLog + numsLog - 1;
+    
+    // Make sure we don't exceed MAX_LOGS
+    if (endLog > MAX_LOGS)
+    {
+      endLog = MAX_LOGS;
+      DEBUG_PRINTF("[MQTT] Adjusted endLog to MAX_LOGS=%d\n", MAX_LOGS);
+    }
+    
+    DEBUG_PRINTF("[MQTT] Reading logs from %d to %d...\n", beginLog, endLog);
+    
+    // Create response JSON with compressed format (short keys + array values)
+    DynamicJsonDocument responseDoc(32768); // 32KB buffer for up to 200 logs
+    responseDoc["M"] = companyInfo.Mst;        // Mst
+    responseDoc["I"] = TopicMqtt;              // IdDevice
+    responseDoc["B"] = beginLog;                // BeginLog
+    responseDoc["N"] = numsLog;                 // Numslog
+    
+    JsonArray logsArray = responseDoc.createNestedArray("L"); // Logs array
+    
+    int found = 0;
+    int notFound = 0;
+    
+    // Read logs from Flash and add to array
+    for (uint16_t logId = beginLog; logId <= endLog; logId++)
+    {
+      // Feed WDT every 20 logs to prevent timeout (20 logs × ~150ms = 3s per batch)
+      if ((logId - beginLog) % 20 == 0)
+      {
+        esp_task_wdt_reset();
+        yield(); // Allow other tasks to run
+      }
+      
+      // Read log from Flash
+      if (xSemaphoreTake(flashMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+      {
+        File dataFile = LittleFS.open(FLASH_DATA_FILE, "r");
+        if (dataFile)
+        {
+          PumpLog log;
+          uint32_t offset = (logId - 1) * sizeof(PumpLog);
+          dataFile.seek(offset, SeekSet);
+          size_t bytesRead = dataFile.read((uint8_t*)&log, sizeof(PumpLog));
+          dataFile.close();
+          
+          if (bytesRead == sizeof(PumpLog) && log.viTriLogData == logId)
+          {
+            // Add this log as compact array format: [id,voi,cot,data,bomb,lit,gia,total,tien,d,m,y,h,min,s,sent,time]
+            JsonArray logArray = logsArray.createNestedArray();
+            logArray.add(logId);                  // 0: logId
+            logArray.add(log.idVoi);              // 1: idVoi
+            logArray.add(log.viTriLogCot);        // 2: viTriLogCot
+            logArray.add(log.viTriLogData);       // 3: viTriLogData
+            logArray.add(log.maLanBom);           // 4: maLanBom
+            logArray.add(log.soLitBom);           // 5: soLitBom
+            logArray.add(log.donGia);             // 6: donGia
+            logArray.add(log.soTotalTong);        // 7: soTotalTong
+            logArray.add(log.soTienBom);          // 8: soTienBom
+            logArray.add(log.ngay);               // 9: ngay
+            logArray.add(log.thang);              // 10: thang
+            logArray.add(log.nam);                // 11: nam
+            logArray.add(log.gio);                // 12: gio
+            logArray.add(log.phut);               // 13: phut
+            logArray.add(log.giay);               // 14: giay
+            logArray.add(log.mqttSent);           // 15: mqttSent
+            
+            // Format timestamp
+            if (log.mqttSentTime > 0) {
+              struct tm *timeinfo = localtime(&log.mqttSentTime);
+              char formattedTime[32];
+              snprintf(formattedTime, sizeof(formattedTime), "%02d/%02d/%04d-%02d:%02d:%02d",
+                       timeinfo->tm_mday, timeinfo->tm_mon + 1, timeinfo->tm_year + 1900,
+                       timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+              logArray.add(formattedTime);        // 16: mqttSentTime
+            } else {
+              logArray.add("N/A");                // 16: mqttSentTime
+            }
+            
+            found++;
+            DEBUG_PRINTF("[MQTT] ✓ Added log %d to response array\n", logId);
+          }
+          else
+          {
+            DEBUG_PRINTF("[MQTT] Log %d not found or invalid in Flash\n", logId);
+            notFound++;
+          }
+        }
+        else
+        {
+          DEBUG_PRINTLN("[MQTT] ✗ Failed to open Flash file for log read");
+          notFound++;
+        }
+        xSemaphoreGive(flashMutex);
+      }
+      else
+      {
+        DEBUG_PRINTF("[MQTT] ⚠️ Flash mutex timeout for log %d\n", logId);
+        notFound++;
+      }
+    }
+    
+    // Add summary to response (short keys)
+    responseDoc["F"] = found;        // TotalFound
+    responseDoc["X"] = notFound;     // TotalNotFound (X for eXcluded/miXing)
+    
+    // Serialize and publish the complete response
+    String jsonString;
+    serializeJson(responseDoc, jsonString);
+    
+    DEBUG_PRINTF("[MQTT] RequestLog Summary: Found=%d, NotFound=%d, Total=%d (from %d to %d)\n", 
+                  found, notFound, numsLog, beginLog, endLog);
+    DEBUG_PRINTF("[MQTT] Response JSON size: %d bytes\n", jsonString.length());
+    
+    if (found > 0)
+    {
+      if (mqttClient.publish(responseTopic, jsonString.c_str()))
+      {
+        DEBUG_PRINTF("[MQTT] ✓ Published %d logs to %s\n", found, responseTopic);
+        char statusMsg[64];
+        snprintf(statusMsg, sizeof(statusMsg), "Published %d log(s)", found);
+        setSystemStatus("OK", statusMsg);
+      }
+      else
+      {
+        LOG_ERROR_F("[MQTT] ✗ Failed to publish response (size: %d bytes)\n", jsonString.length());
+        setSystemStatus("ERROR", "Failed to publish log response - payload may be too large");
+      }
+    }
+    else
+    {
+      DEBUG_PRINTLN("[MQTT] No logs found to publish");
+      setSystemStatus("WARNING", "No logs found");
+    }
+  }
   
   Serial.println("=== MQTT CALLBACK FINISHED ===\n");
 }
@@ -1420,8 +1823,8 @@ void sendMQTTData(const PumpLog &log)
   if (mqttSuccess)
   {
     updatedLog.mqttSent = 1; // Success
-    Serial.printf("✓ Log %d: MQTT sent successfully at %ld\n", 
-                  updatedLog.viTriLogData, updatedLog.mqttSentTime);
+    // Serial.printf("✓ Log %d: MQTT sent successfully at %ld\n", 
+                  // updatedLog.viTriLogData, updatedLog.mqttSentTime);
   }
   else
   {
@@ -1429,11 +1832,18 @@ void sendMQTTData(const PumpLog &log)
     Serial.println("ERROR: MQTT send failed after maximum retries");
     Serial.printf("✗ Log %d: MQTT failed at %ld\n", 
                   updatedLog.viTriLogData, updatedLog.mqttSentTime);
-    setSystemStatus("ERROR", "MQTT send failed after " + String(maxRetries) + " retries");
+    char errorMsg[64];
+    snprintf(errorMsg, sizeof(errorMsg), "MQTT send failed after %d retries", maxRetries);
+    setSystemStatus("ERROR", errorMsg);
   }
 
   // Save to Flash at position viTriLogData (1-5000)
-  if (updatedLog.viTriLogData >= 1 && updatedLog.viTriLogData <= MAX_LOGS)
+  // Skip if old partition detected (to prevent crashes)
+  if (!g_flashSaveEnabled)
+  {
+    Serial.printf("⚠️ Flash save SKIPPED for Log %d (old partition detected)\n", updatedLog.viTriLogData);
+  }
+  else if (updatedLog.viTriLogData >= 1 && updatedLog.viTriLogData <= MAX_LOGS)
   {
     if (xSemaphoreTake(flashMutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
@@ -1444,11 +1854,18 @@ void sendMQTTData(const PumpLog &log)
       
       if (dataFile)
       {
-        uint32_t offset = (updatedLog.viTriLogData - 1) * sizeof(PumpLog);
+        uint32_t offset = (updatedLog.viTriLogData - 1) * sizeof(PumpLog); // CRITICAL: uint32_t not uint16_t!
         dataFile.seek(offset, SeekSet);
-        dataFile.write((const uint8_t*)&updatedLog, sizeof(PumpLog));
+        size_t written = dataFile.write((const uint8_t*)&updatedLog, sizeof(PumpLog));
         dataFile.close();
-        Serial.printf("💾 Log %d saved to Flash (mqttSent=%d)\n", updatedLog.viTriLogData, updatedLog.mqttSent);
+        
+        if (written == sizeof(PumpLog)) {
+          Serial.printf("💾 Log %d saved to Flash at offset %u (mqttSent=%d)\n", 
+                        updatedLog.viTriLogData, offset, updatedLog.mqttSent);
+        } else {
+          Serial.printf("⚠️ Partial write for Log %d: %u/%u bytes\n", 
+                        updatedLog.viTriLogData, written, sizeof(PumpLog));
+        }
       }
       else
       {
@@ -1459,6 +1876,7 @@ void sendMQTTData(const PumpLog &log)
     else
     {
       Serial.printf("⚠️ Flash mutex timeout for Log %d\n", updatedLog.viTriLogData);
+      xSemaphoreGive(flashMutex);
     }
   }
   else
@@ -1473,11 +1891,39 @@ void readRS485Data(byte *buffer)
   {
     return;
   }
+
+  // RS485 Statistics for monitoring data quality
+  static struct {
+    unsigned long totalPackets = 0;
+    unsigned long validLogs = 0;
+    unsigned long invalidLogs = 0;
+    unsigned long validPriceResponses = 0;
+    unsigned long invalidPriceResponses = 0;
+    unsigned long lastStatsReport = 0;
+  } rs485Stats;
+  
+  // Report statistics every 10 minutes
+  unsigned long now = millis();
+  if (now - rs485Stats.lastStatsReport >= 600000) // 10 minutes
+  {
+    rs485Stats.lastStatsReport = now;
+    if (rs485Stats.totalPackets > 0)
+    {
+      float validLogRate = (rs485Stats.validLogs * 100.0) / rs485Stats.totalPackets;
+      float validPriceRate = (rs485Stats.validPriceResponses * 100.0) / rs485Stats.totalPackets;
+      Serial.println("\n=== RS485 DATA QUALITY REPORT (10 min) ===");
+      Serial.printf("Total packets: %lu\n", rs485Stats.totalPackets);
+      Serial.printf("Valid logs: %lu (%.1f%%)\n", rs485Stats.validLogs, validLogRate);
+      Serial.printf("Invalid logs: %lu\n", rs485Stats.invalidLogs);
+      Serial.printf("Valid price responses: %lu (%.1f%%)\n", rs485Stats.validPriceResponses, validPriceRate);
+      Serial.printf("Invalid price responses: %lu\n", rs485Stats.invalidPriceResponses);
+      Serial.println("==========================================\n");
+    }
+  }
   
   // Limit processing to prevent overflow from TTL boot spam
   static unsigned long lastReadTime = 0;
   static int consecutiveReads = 0;
-  unsigned long now = millis();
   
   if (now - lastReadTime < 50)
   {
@@ -1517,123 +1963,150 @@ void readRS485Data(byte *buffer)
     uint8_t priceResponse[4];
     if (Serial2.readBytes(priceResponse, 4) == 4)
     {
-      // Validate format: [7][ID][Status][8]
-      if (priceResponse[0] == 7 && priceResponse[3] == 8)
+      // Validate header and footer FIRST to detect corrupt packets early
+      if (priceResponse[0] != 7 || priceResponse[3] != 8)
       {
-        uint8_t deviceId = priceResponse[1];
-        char status = priceResponse[2];
+        DEBUG_PRINTF("[RS485 READ] ⚠️ Invalid price response header/footer: [0x%02X][0x%02X][0x%02X][0x%02X]\n",
+                     priceResponse[0], priceResponse[1], priceResponse[2], priceResponse[3]);
+        return;
+      }
+      
+      uint8_t deviceId = priceResponse[1];
+      char status = priceResponse[2];
+      
+      // Validate status byte BEFORE deviceId (catch corruption early)
+      if (status != 'S' && status != 'E')
+      {
+        rs485Stats.totalPackets++;
+        rs485Stats.invalidPriceResponses++;
         
-        // Validate deviceId is in valid range (11-20)
-        if (deviceId < 11 || deviceId > 20)
+        static int invalidStatusCount = 0;
+        invalidStatusCount++;
+        if (invalidStatusCount % 10 == 0)
         {
-          // Reduce log spam - only log every 10th invalid response
-          static int invalidCount = 0;
-          invalidCount++;
-          if (invalidCount % 10 == 0)
-          {
-            Serial.printf("[RS485 READ] ⚠️ Ignoring invalid DeviceID=%d (count: %d, valid range: 11-20)\n", deviceId, invalidCount);
-          }
-          return;
+          Serial.printf("[RS485 READ] ⚠️ Invalid status byte: '%c' (0x%02X) - likely corrupt data (count: %d)\n", 
+                        status, (uint8_t)status, invalidStatusCount);
+        }
+        return;
+      }
+      
+      // Validate deviceId is in valid range (11-20)
+      if (deviceId < 11 || deviceId > 20)
+      {
+        rs485Stats.totalPackets++;
+        rs485Stats.invalidPriceResponses++;
+        
+        // Reduce log spam - only log every 10th invalid response
+        static int invalidDeviceIdCount = 0;
+        invalidDeviceIdCount++;
+        if (invalidDeviceIdCount % 10 == 0)
+        {
+          Serial.printf("[RS485 READ] ⚠️ Ignoring invalid DeviceID=%d (count: %d, valid range: 11-20)\n", deviceId, invalidDeviceIdCount);
+        }
+        return;
+      }
+      
+      // Valid price response
+      rs485Stats.totalPackets++;
+      rs485Stats.validPriceResponses++;
+      
+      // Log valid response (debug only)
+      DEBUG_PRINTF("\n[RS485 READ] Price Change Response: ");
+      for (int i = 0; i < 4; i++) {
+        if (i == 2) {
+          DEBUG_PRINTF("'%c'(0x%02X) ", priceResponse[i], priceResponse[i]);
+        } else {
+          DEBUG_PRINTF("0x%02X ", priceResponse[i]);
+        }
+      }
+      DEBUG_PRINTLN("");
+      
+      // Parse status
+      if (status == 'S')
+      {
+        DEBUG_PRINTF("[RS485 READ] ✓ SUCCESS - DeviceID=%d price updated successfully\n", deviceId);
+        
+        // Save price to Flash for this nozzle
+        if (deviceId == lastPriceChangeRequest.deviceId)
+        {
+          // Convert deviceId to nozzorle string
+          char nozzorleStr[4];
+          snprintf(nozzorleStr, sizeof(nozzorleStr), "%d", deviceId);
+          updateNozzlePrice(nozzorleStr, lastPriceChangeRequest.idDevice, 
+                          lastPriceChangeRequest.unitPrice, nozzlePrices, flashMutex);
         }
         
-        // Log valid response (debug only)
-        DEBUG_PRINTF("\n[RS485 READ] Price Change Response: ");
-        for (int i = 0; i < 4; i++) {
-          if (i == 2) {
-            DEBUG_PRINTF("'%c'(0x%02X) ", priceResponse[i], priceResponse[i]);
-          } else {
-            DEBUG_PRINTF("0x%02X ", priceResponse[i]);
-          }
-        }
-        DEBUG_PRINTLN("");
-        
-        // Parse status
-        if (status == 'S')
+        // Publish Complete response to MQTT
+        if (mqttClient.connected() && deviceId == lastPriceChangeRequest.deviceId)
         {
-          DEBUG_PRINTF("[RS485 READ] ✓ SUCCESS - DeviceID=%d price updated successfully\n", deviceId);
+          // Build response topic: {CompanyId}/FinishPrice
+          char responseTopic[100];
+          snprintf(responseTopic, sizeof(responseTopic), "%s/FinishPrice", companyInfo.CompanyId);
           
-          // Save price to Flash for this nozzle
-          if (deviceId == lastPriceChangeRequest.deviceId)
-          {
-            // Convert deviceId to nozzorle string
-            char nozzorleStr[4];
-            snprintf(nozzorleStr, sizeof(nozzorleStr), "%d", deviceId);
-            updateNozzlePrice(nozzorleStr, lastPriceChangeRequest.idDevice, 
-                            lastPriceChangeRequest.unitPrice, nozzlePrices, flashMutex);
-          }
+          // Build JSON response with new structure
+          DynamicJsonDocument doc(1024);
+          doc["topic"] = lastPriceChangeRequest.idChiNhanh;
           
-          // Publish Complete response to MQTT
-          if (mqttClient.connected() && deviceId == lastPriceChangeRequest.deviceId)
+          // Build clientid: {IDChiNhanh}/GetStatus/{TopicMqtt}
+          char clientId[100];
+          snprintf(clientId, sizeof(clientId), "%s/GetStatus/%s", 
+                   lastPriceChangeRequest.idChiNhanh, TopicMqtt);
+          doc["clientid"] = clientId;
+          
+          // Get timestamp from the nozzle that was just updated
+          int nozzleIndex = deviceId - 11;  // Map 11-20 to index 0-9
+          time_t updatedTimestamp = nozzlePrices.nozzles[nozzleIndex].updatedAt;
+          
+          // Format timestamp to dd/mm/yyyy-HH:MM:SS
+          struct tm *timeinfo = localtime(&updatedTimestamp);
+          char formattedTime[32];
+          snprintf(formattedTime, sizeof(formattedTime), "%02d/%02d/%04d-%02d:%02d:%02d",
+                   timeinfo->tm_mday, timeinfo->tm_mon + 1, timeinfo->tm_year + 1900,
+                   timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+          
+          doc["timestamp"] = formattedTime;
+          
+          // Build message array
+          JsonArray messageArray = doc.createNestedArray("message");
+          JsonObject entry = messageArray.createNestedObject();
+          entry["Key"] = "UpdatePrice";
+          
+          JsonObject item = entry.createNestedObject("item");
+          item["IDChiNhanh"] = lastPriceChangeRequest.idChiNhanh;
+          item["IdDevice"] = lastPriceChangeRequest.idDevice;
+          item["UnitPrice"] = lastPriceChangeRequest.unitPrice;
+          item["UpdatedAt"] = formattedTime;  // Formatted timestamp từ Flash
+          
+          String jsonString;
+          serializeJson(doc, jsonString);
+          
+          if (mqttClient.publish(responseTopic, jsonString.c_str()))
           {
-            // Build response topic: {CompanyId}/FinishPrice
-            char responseTopic[100];
-            snprintf(responseTopic, sizeof(responseTopic), "%s/FinishPrice", companyInfo.CompanyId);
-            
-            // Build JSON response with new structure
-            DynamicJsonDocument doc(1024);
-            doc["topic"] = lastPriceChangeRequest.idChiNhanh;
-            
-            // Build clientid: {IDChiNhanh}/GetStatus/{TopicMqtt}
-            char clientId[100];
-            snprintf(clientId, sizeof(clientId), "%s/GetStatus/%s", 
-                     lastPriceChangeRequest.idChiNhanh, TopicMqtt);
-            doc["clientid"] = clientId;
-            
-            // Get timestamp from the nozzle that was just updated
-            int nozzleIndex = deviceId - 11;  // Map 11-20 to index 0-9
-            time_t updatedTimestamp = nozzlePrices.nozzles[nozzleIndex].updatedAt;
-            
-            // Format timestamp to dd/mm/yyyy-HH:MM:SS
-            struct tm *timeinfo = localtime(&updatedTimestamp);
-            char formattedTime[32];
-            snprintf(formattedTime, sizeof(formattedTime), "%02d/%02d/%04d-%02d:%02d:%02d",
-                     timeinfo->tm_mday, timeinfo->tm_mon + 1, timeinfo->tm_year + 1900,
-                     timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
-            
-            doc["timestamp"] = formattedTime;
-            
-            // Build message array
-            JsonArray messageArray = doc.createNestedArray("message");
-            JsonObject entry = messageArray.createNestedObject();
-            entry["Key"] = "UpdatePrice";
-            
-            JsonObject item = entry.createNestedObject("item");
-            item["IDChiNhanh"] = lastPriceChangeRequest.idChiNhanh;
-            item["IdDevice"] = lastPriceChangeRequest.idDevice;
-            item["UnitPrice"] = lastPriceChangeRequest.unitPrice;
-            item["UpdatedAt"] = formattedTime;  // Formatted timestamp từ Flash
-            
-            String jsonString;
-            serializeJson(doc, jsonString);
-            
-            if (mqttClient.publish(responseTopic, jsonString.c_str()))
-            {
-              Serial.printf("[RS485 READ] ✓ Published FinishPrice to %s: %s\n", responseTopic, jsonString.c_str());
-            }
-            else
-            {
-              Serial.printf("[RS485 READ] ✗ Failed to publish FinishPrice to %s\n", responseTopic);
-            }
+            Serial.printf("[RS485 READ] ✓ Published FinishPrice to %s: %s\n", responseTopic, jsonString.c_str());
+          }
+          else
+          {
+            Serial.printf("[RS485 READ] ✗ Failed to publish FinishPrice to %s\n", responseTopic);
           }
         }
-        else if (status == 'E')
-        {
-          Serial.printf("[RS485 READ] ✗ ERROR - DeviceID=%d rejected price update (KPL returned 'E')\n", deviceId);
-          Serial.printf("[RS485 READ] ⚠️ Error response ignored - NOT publishing to MQTT\n");
-          // Do NOT publish Error response to MQTT - only Success is published
-        }
-        else
-        {
-          Serial.printf("[RS485 READ] ✗ UNKNOWN STATUS - DeviceID=%d, Status='%c' (0x%02X)\n", 
-                        deviceId, status, status);
-          Serial.printf("[RS485 READ] ⚠️ Unknown status ignored - NOT publishing to MQTT\n");
-        }
+      }
+      else if (status == 'E')
+      {
+        Serial.printf("[RS485 READ] ✗ ERROR - DeviceID=%d rejected price update (KPL returned 'E')\n", deviceId);
+        Serial.printf("[RS485 READ] ⚠️ Error response ignored - NOT publishing to MQTT\n");
+        // Do NOT publish Error response to MQTT - only Success is published
       }
       else
       {
-        Serial.printf("[RS485 READ] Invalid price response format: [0x%02X][0x%02X][0x%02X][0x%02X]\n",
-                      priceResponse[0], priceResponse[1], priceResponse[2], priceResponse[3]);
+        Serial.printf("[RS485 READ] ✗ UNKNOWN STATUS - DeviceID=%d, Status='%c' (0x%02X)\n", 
+                      deviceId, status, status);
+        Serial.printf("[RS485 READ] ⚠️ Unknown status ignored - NOT publishing to MQTT\n");
       }
+    }
+    else
+    {
+      Serial.printf("[RS485 READ] Invalid price response format: [0x%02X][0x%02X][0x%02X][0x%02X]\n",
+                    priceResponse[0], priceResponse[1], priceResponse[2], priceResponse[3]);
     }
     return;
   }
@@ -1653,36 +2126,73 @@ void readRS485Data(byte *buffer)
     }
     
     if (bytesRead == LOG_SIZE)
+  {
+    // Validate data
+    uint8_t calculatedChecksum = calculateChecksum_LogData(buffer, LOG_SIZE);
+    uint8_t receivedChecksum = buffer[30];
+
+    if (calculatedChecksum == receivedChecksum &&
+        buffer[0] == 1 && buffer[1] == 2 &&
+        buffer[29] == 3 && buffer[31] == 4)
     {
-      // Validate data
-      uint8_t calculatedChecksum = calculateChecksum_LogData(buffer, LOG_SIZE);
-      uint8_t receivedChecksum = buffer[30];
+        // Valid pump log
+        rs485Stats.totalPackets++;
+        rs485Stats.validLogs++;
 
-      if (calculatedChecksum == receivedChecksum &&
-          buffer[0] == 1 && buffer[1] == 2 &&
-          buffer[29] == 3 && buffer[31] == 4)
-      {
         // Process valid pump log data
-        PumpLog log;
-        ganLog(buffer, log);
+    PumpLog log;
+      ganLog(buffer, log);
         
-        // kiểm tra mqttQueue có dữ liệu không
-        if (uxQueueMessagesWaiting(mqttQueue) > 0)
-        {
-          Serial.println("MQTT queue is not empty, skipping...");
-          return;
-        }
+      // kiểm tra mqttQueue có dữ liệu không
+      if (uxQueueMessagesWaiting(mqttQueue) > 0)
+      {
+        Serial.println("MQTT queue is not empty, skipping...");
+        return;
+      }
 
-        if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
-        {
-          Serial.println("Log data queued for MQTT");
-          // Trigger relay
-          xTaskCreate(ConnectedKPLBox, "ConnectedKPLBox", 1024, NULL, 3, NULL);
+      if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
+      {
+        Serial.println("Log data queued for MQTT");
+        // Trigger relay
+          xTaskCreate(ConnectedKPLBox, "ConnectedKPLBox", 1024, NULL, 4, NULL);
         }
       }
       else
       {
-        Serial.println("[RS485 READ] Invalid pump log: checksum or format error");
+        // Invalid pump log
+        rs485Stats.totalPackets++;
+        rs485Stats.invalidLogs++;
+        
+        // Enhanced error logging for debugging corruption
+        static int invalidLogCount = 0;
+        invalidLogCount++;
+        
+        // Log every 10th error to avoid spam, but provide detailed info
+        if (invalidLogCount % 10 == 0)
+        {
+          Serial.printf("[RS485 READ] ❌ Invalid pump log #%d:\n", invalidLogCount);
+          Serial.printf("  Checksum: calc=0x%02X recv=0x%02X %s\n", 
+                        calculatedChecksum, buffer[30], 
+                        (calculatedChecksum == buffer[30] ? "✓" : "✗"));
+          Serial.printf("  Header: [0x%02X][0x%02X] %s\n", 
+                        buffer[0], buffer[1],
+                        (buffer[0] == 1 && buffer[1] == 2 ? "✓" : "✗"));
+          Serial.printf("  Footer: [0x%02X][0x%02X] %s\n", 
+                        buffer[29], buffer[31],
+                        (buffer[29] == 3 && buffer[31] == 4 ? "✓" : "✗"));
+          
+          // Dump first 8 bytes for pattern analysis
+          Serial.print("  Data preview: ");
+          for(int i = 0; i < 8; i++) {
+            Serial.printf("0x%02X ", buffer[i]);
+          }
+          Serial.println();
+        }
+        else
+        {
+          // Reduced logging for other errors
+          DEBUG_PRINTLN("[RS485 READ] Invalid pump log: checksum or format error");
+        }
       }
     }
     else
@@ -1767,54 +2277,47 @@ void sendPriceChangeCommand(const PriceChangeRequest &request)
   Serial.printf("\n[PRICE CHANGE] Sending command: DeviceID=%d, IdDevice=%s, IDChiNhanh=%s, Price=%.2f\n", 
                 request.deviceId, request.idDevice, request.idChiNhanh, request.unitPrice);
   
-  // Convert price to 6-digit ASCII string (Char 0-5)
-  // Format as integer with leading zeros (6 digits for Char 0-5)
-  char priceStr[7];
-  snprintf(priceStr, sizeof(priceStr), "%06d", (int)request.unitPrice);
+  // Clear RX buffer before sending
+  while (Serial2.available()) {
+    Serial2.read();
+  }
   
-  // Build buffer according to protocol (10 bytes total)
+  // Format price to 6 digits ASCII
+  char priceStr[7];
+  snprintf(priceStr, sizeof(priceStr), "%06d", static_cast<int>(request.unitPrice));
+  
+  // Prepare command buffer
   // Protocol: [PM(9)] [ID_Device] [Price_Char0-5 (6 bytes)] [Checksum] [LF(10)]
-  uint8_t buffer[10];
-  buffer[0] = 9;                 // PM command (Dec 9)
-  buffer[1] = request.deviceId;  // ID Device (11-20)
-  buffer[2] = priceStr[5];       // Đơn giá Char(0) - ASCII
-  buffer[3] = priceStr[4];       // Đơn giá Char(1) - ASCII
-  buffer[4] = priceStr[3];       // Đơn giá Char(2) - ASCII
-  buffer[5] = priceStr[2];       // Đơn giá Char(3) - ASCII
-  buffer[6] = priceStr[1];       // Đơn giá Char(4) - ASCII
-  buffer[7] = priceStr[0];       // Đơn giá Char(5) - ASCII
+  byte command[10];
+  command[0] = 9;
+  command[1] = static_cast<byte>(request.deviceId);
+  
+  // Price digits (reversed order as per protocol)
+  command[2] = priceStr[5];  // Char(0)
+  command[3] = priceStr[4];  // Char(1)
+  command[4] = priceStr[3];  // Char(2)
+  command[5] = priceStr[2];  // Char(3)
+  command[6] = priceStr[1];  // Char(4)
+  command[7] = priceStr[0];  // Char(5)
   
   // Calculate checksum: 0x5A XOR all data bytes (ID + Price chars)
-  uint8_t checksum = 0x5A ^ buffer[1] ^ buffer[2] ^ buffer[3] ^ buffer[4] ^ buffer[5] ^ buffer[6] ^ buffer[7];
-  buffer[8] = checksum;          // Char(Cksum)
-  buffer[9] = 10;                // End byte (Dec 10 = LF)
+  uint8_t checksum = 0x5A ^ command[1] ^ command[2] ^ command[3] ^ command[4] ^ command[5] ^ command[6] ^ command[7];
+  command[8] = checksum;
+  command[9] = 10;  // End byte (LF)
   
-  // Send via RS485 (Serial2)
-  Serial2.write(buffer, sizeof(buffer));
-  Serial2.flush(); // Wait for transmission to complete
+  // Send command
+  Serial2.write(command, 10);
   
-  Serial.printf("[PRICE CHANGE] ✓ Command sent to KPL: DeviceID=%d, Price=%.2f -> ASCII: %s\n", 
-                request.deviceId, request.unitPrice, priceStr);
-  Serial.print("[PRICE CHANGE] Data (HEX): ");
-  for (int i = 0; i < sizeof(buffer); i++) {
-    Serial.printf("0x%02X ", buffer[i]);
-  }
-  Serial.print("\n[PRICE CHANGE] Data (ASCII): ");
-  for (int i = 0; i < sizeof(buffer); i++) {
-    if (i >= 2 && i <= 7) {
-      Serial.printf("'%c' ", buffer[i]);
-    } else {
-      Serial.printf("0x%02X ", buffer[i]);
-    }
+  Serial.print("[PRICE CHANGE] Sent: ");
+  for (int i = 0; i < 10; i++) {
+    Serial.printf("0x%02X ", command[i]);
   }
   Serial.println();
-  Serial.println("[PRICE CHANGE] Response will be handled by readRS485Data()");
 }
 
 void ConnectedKPLBox(void *param)
 {
   digitalWrite(OUT1, HIGH);
-  vTaskDelay(pdMS_TO_TICKS(200));
   digitalWrite(OUT2, HIGH);
   vTaskDelay(pdMS_TO_TICKS(200));
   digitalWrite(OUT1, LOW);
@@ -2134,7 +2637,9 @@ void performOTAUpdateViaAPI(const String& apiEndpoint, const String& ftpUrl)
   {
     Serial.printf("[OTA ERROR] API request failed. HTTP Code: %d\n", httpCode);
     Serial.printf("[OTA ERROR] Server response: %s\n", http.getString().c_str());
-    setSystemStatus("ERROR", "OTA: API Error " + String(httpCode));
+    char errorMsg[64];
+    snprintf(errorMsg, sizeof(errorMsg), "OTA: API Error %d", httpCode);
+    setSystemStatus("ERROR", errorMsg);
     http.end();
     digitalWrite(OUT2, LOW);
     return;
@@ -2158,7 +2663,9 @@ void performOTAUpdateViaAPI(const String& apiEndpoint, const String& ftpUrl)
   if (!updateStarted)
   {
     Serial.printf("[OTA ERROR] Not enough space for OTA. Error: %s\n", Update.errorString());
-    setSystemStatus("ERROR", "OTA: " + String(Update.errorString()));
+    char errorMsg[64];
+    snprintf(errorMsg, sizeof(errorMsg), "OTA: %s", Update.errorString());
+    setSystemStatus("ERROR", errorMsg);
     http.end();
     digitalWrite(OUT2, LOW);
     return;
@@ -2269,7 +2776,9 @@ ota_end:
   if (Update.hasError())
   {
     Serial.printf("[OTA ERROR] Update failed with error: %s\n", Update.errorString());
-    setSystemStatus("ERROR", "OTA: " + String(Update.errorString()));
+    char errorMsg[64];
+    snprintf(errorMsg, sizeof(errorMsg), "OTA: %s", Update.errorString());
+    setSystemStatus("ERROR", errorMsg);
   }
   else if (Update.isFinished())
   {
@@ -2292,4 +2801,132 @@ ota_end:
   }
   
   Serial.println("=== OTA UPDATE VIA API PROCESS COMPLETED ===");
+}
+
+// CRITICAL: New function to print partition table info
+void printPartitionInfo()
+{
+  Serial.println("\n--- VERIFYING PARTITION TABLE ---");
+  const esp_partition_t *partition = NULL;
+  esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, NULL);
+  if (it) {
+    Serial.println("App Partitions:");
+    do {
+      partition = esp_partition_get(it);
+      if (partition) {
+        Serial.printf("  - Name: %s, Type: %d, Subtype: %d, Address: 0x%X, Size: %u (%.2f MB)\n",
+                      partition->label, partition->type, partition->subtype,
+                      partition->address, partition->size, partition->size / 1024.0 / 1024.0);
+      }
+    } while ((it = esp_partition_next(it)));
+    esp_partition_iterator_release(it);
+  }
+
+  // Check for littlefs partition
+  bool hasCorrectPartition = false;
+  it = esp_partition_find(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, NULL);
+  if (it) {
+    Serial.println("Data Partitions:");
+    do {
+      partition = esp_partition_get(it);
+      if (partition) {
+        Serial.printf("  - Name: %s, Type: %d, Subtype: %d, Address: 0x%X, Size: %u (%.2f KB)\n",
+                      partition->label, partition->type, partition->subtype,
+                      partition->address, partition->size, partition->size / 1024.0);
+        
+        if (strcmp(partition->label, "littlefs") == 0) {
+          if (partition->size == 0xA0000) {
+            Serial.println("    [✓] CORRECT: LittleFS size is 640KB. OK.");
+            hasCorrectPartition = true;
+          } else if (partition->size == 0x200000) {
+            Serial.println("    [❌] ERROR: OLD PARTITION! LittleFS size is 2MB. THIS IS THE PROBLEM!");
+          } else {
+            Serial.printf("    [⚠️] WARNING: UNEXPECTED LittleFS size: %u bytes.\n", partition->size);
+          }
+        }
+      }
+    } while ((it = esp_partition_next(it)));
+    esp_partition_iterator_release(it);
+  }
+  
+  // If no littlefs or wrong size, show update instructions
+  if (!hasCorrectPartition) {
+    Serial.println("\n╔═════════════════════════════════════════════════════════╗");
+    Serial.println("║  ⚠️  THIẾT BỊ CẦN CẬP NHẬT PARTITION TABLE ⚠️         ║");
+    Serial.println("╚═════════════════════════════════════════════════════════╝");
+    Serial.println("\nThiết bị đang dùng partition cũ/sai, cần flash lại USB.");
+    Serial.println("\nHƯỚNG DẪN CẬP NHẬT:");
+    Serial.println("1. Tải công cụ: https://kpltech.vn/flash-tool");
+    Serial.println("2. Kết nối thiết bị qua USB");
+    Serial.println("3. Chạy: flash-update.bat (Windows) hoặc flash-update.sh (Mac/Linux)");
+    Serial.println("4. Đợi 5 phút để hoàn tất");
+    Serial.println("\n⚠️ Thiết bị vẫn hoạt động NHƯNG KHÔNG LƯU LOG vào Flash");
+    Serial.println("để tránh crash. Logs vẫn được gửi MQTT bình thường.");
+    Serial.println("\nHỗ trợ kỹ thuật: 0xxx-xxx-xxx (miễn phí)");
+    Serial.println("═════════════════════════════════════════════════════════\n");
+    
+    // Disable flash writes to prevent crashes
+    g_flashSaveEnabled = false;
+    
+    // Send alert to MQTT if connected
+    if (WiFi.status() == WL_CONNECTED) {
+      // Will send alert after MQTT connects in main loop
+    }
+  } else {
+    g_flashSaveEnabled = true;
+  }
+  
+  Serial.println("-----------------------------------\n");
+}
+
+// SECURITY: Validate MAC address with server
+bool validateMacWithServer(const char* macAddress)
+{
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("⚠️ No WiFi - skipping MAC validation (will retry after WiFi connects)");
+    return true; // Allow boot without WiFi, will validate later
+  }
+  
+  HTTPClient http;
+  String url = String(API_BASE_URL) + "/validate-mac"; // New endpoint
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(10000); // 10 second timeout
+  
+  // Create validation request
+  DynamicJsonDocument doc(256);
+  doc["mac"] = macAddress;
+  doc["deviceId"] = TopicMqtt;
+  doc["firmwareVersion"] = "2024.11.04";
+  doc["timestamp"] = time(NULL);
+  
+  String json;
+  serializeJson(doc, json);
+  
+  Serial.printf("Validating MAC with server: %s\n", macAddress);
+  
+  int httpCode = http.POST(json);
+  String response = http.getString();
+  
+  if (httpCode == 200) {
+    // Parse response
+    DynamicJsonDocument responseDoc(512);
+    DeserializationError error = deserializeJson(responseDoc, response);
+    
+    if (!error && responseDoc["authorized"].as<bool>()) {
+      Serial.println("✓ MAC validated successfully");
+      return true;
+    } else {
+      Serial.printf("❌ Server rejected MAC: %s\n", responseDoc["message"].as<const char*>());
+      return false;
+    }
+  } else if (httpCode == 403) {
+    Serial.println("❌ MAC not authorized by server");
+    return false;
+  } else {
+    Serial.printf("⚠️ Server validation failed (HTTP %d) - allowing boot\n", httpCode);
+    return true; // Allow boot if server is down (graceful degradation)
+  }
+  
+  http.end();
 }

@@ -31,6 +31,7 @@ public:
     bool connectToWiFi();
     void startWiFiAP();
     void scanWiFi();
+    bool isRouterAvailable(); // Check if configured router SSID is broadcasting
     
     // Web server management
     void setupWebServer();

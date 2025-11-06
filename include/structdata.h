@@ -3,7 +3,7 @@
 
 #include <cstdint>
 #include <Arduino.h>
-#define MAX_LOGS 5000       // Số log tối đa (cố định)
+#define MAX_LOGS 2046       // Số log tối đa (cố định)
 #define LOG_SIZE 32         // Kích thước mỗi log
 
 

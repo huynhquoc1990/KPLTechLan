@@ -1,0 +1,18 @@
+KPL Tech Flash Tool
+Version: 2025.11.04
+Firmware: c885ab1
+Built: Tue Nov  4 11:41:34 +07 2025
+
+Files included:
+- bootloader.bin    (ESP32 bootloader)
+- partitions.bin    (Partition table with LittleFS 640KB)
+- firmware.bin      (Main application)
+- boot_app0.bin     (OTA boot selector)
+- flash-update.sh   (Mac/Linux flash script)
+- flash-update.bat  (Windows flash script)
+- README.txt        (User instructions in Vietnamese)
+
+Requirements:
+- Python 3 + esptool
+- USB cable
+- ESP32 device with 4MB Flash

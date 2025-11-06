@@ -21,6 +21,51 @@ bool WiFiManager::checkWiFiConfig() {
     return loadConfig() && currentConfig.isValid;
 }
 
+bool WiFiManager::isRouterAvailable() {
+    if (!currentConfig.isValid) {
+        return false;
+    }
+    
+    // Quick scan for router SSID (non-blocking, async scan)
+    // Note: We use a quick scan to check if router is broadcasting
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(100)); // Allow disconnect to complete
+    
+    // Start async scan (non-blocking)
+    int scanResult = WiFi.scanNetworks(true, false); // true = async, false = don't show hidden
+    
+    // Wait for scan to complete (max 5 seconds)
+    int attempts = 0;
+    while (WiFi.scanComplete() < 0 && attempts < 50) {
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        attempts++;
+    }
+    
+    int n = WiFi.scanComplete();
+    if (n < 0) {
+        // Scan didn't complete in time
+        WiFi.scanDelete();
+        return false;
+    }
+    
+    // Check if our SSID is in the scan results
+    bool found = false;
+    for (int i = 0; i < n; i++) {
+        if (WiFi.SSID(i) == currentConfig.ssid) {
+            found = true;
+            Serial.printf("[Router Check] Found router SSID: %s (RSSI: %d dBm)\n", 
+                         currentConfig.ssid.c_str(), WiFi.RSSI(i));
+            break;
+        }
+    }
+    
+    WiFi.scanDelete();
+    return found;
+}
+
 bool WiFiManager::connectToWiFi() {
     if (!currentConfig.isValid) {
         Serial.println("No valid WiFi configuration");
@@ -38,13 +83,17 @@ bool WiFiManager::connectToWiFi() {
     WiFi.setAutoReconnect(true);
     WiFi.persistent(true);
     
+    // Increased timeout: 60 attempts × 500ms = 30 seconds
+    // This gives router more time to boot up after power loss
     int attempts = 0;
-    const int maxAttempts = 30;
+    const int maxAttempts = 60; // Increased from 30 to 60
     
     while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(500));
-        Serial.print(".");
+        if (attempts % 10 == 0) { // Print every 5 seconds
+            Serial.print(".");
+        }
         attempts++;
     }
     

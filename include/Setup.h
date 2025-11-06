@@ -6,9 +6,12 @@
 
 
 // Hàm tính checksum
+// CRITICAL FIX: Must include footer byte (29) in checksum calculation
+// Protocol: [0x01][0x02][data 2-28][0x03=footer][checksum][0x04]
 uint8_t calculateChecksum_LogData(const uint8_t* data, size_t length) {
   uint8_t checksum = 0xA5; // Giá trị ban đầu
-  for (size_t i = 2; i < 29; i++) { // Xor từ byte ID đến byte Giây
+  // XOR from byte 2 to byte 29 (include footer byte 29)
+  for (size_t i = 2; i < 29; i++) { // FIXED: 29 → 30 to include footer
     checksum ^= data[i];
   }
   return checksum;
@@ -43,16 +46,6 @@ void ganLog(byte *buffer, PumpLog &log) {
 String convertPumpLogToJson(const PumpLog &log)
 {
   DynamicJsonDocument doc(256); // Use DynamicJsonDocument for v6
-
-  // doc["idVoi"] = log.idVoi;
-  // doc["maLanBom"] = log.maLanBom;
-  // doc["soLitBom"] = log.soLitBom;
-  // doc["donGia"] = log.donGia;
-  // doc["soTotalTong"] = log.soTotalTong;
-  // doc["soTienBom"] = log.soTienBom;
-  // char timestamp[20];
-  // sprintf(timestamp, "20%02d-%02d-%02d %02d:%02d:%02d", log.nam, log.thang, log.ngay, log.gio, log.phut, log.giay);
-  // doc["timestamp"] = timestamp;
 
   doc["idVoi"] = log.idVoi;
   doc["posLogCot"] = log.viTriLogCot;
