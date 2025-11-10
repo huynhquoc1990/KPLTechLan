@@ -264,7 +264,7 @@ void readMacEsp()
 
   // call api để check mac có trong hệ thống hay không, sử dụng Phương thức Poss
 
-  String url = String(API_BASE_URL) + API_CHECK_MAC_ENDPOINT;
+  String url = String(API_BASE_URL) + API_VALIDATE_MAC_ENDPOINT;
   HTTPClient http;
     http.begin(url);
   http.addHeader("Content-Type", "application/json");
@@ -340,7 +340,7 @@ void systemInit()
   flashMutex = xSemaphoreCreateMutex();
   systemMutex = xSemaphoreCreateMutex();
   mqttQueue = xQueueCreate(300, sizeof(PumpLog)); // Increased from 5
-  logIdLossQueue = xQueueCreate(500, sizeof(DtaLogLoss)); // CRITICAL: Increased from 50 to 500
+  logIdLossQueue = xQueueCreate(300, sizeof(DtaLogLoss)); // CRITICAL: Increased from 50 to 500
   priceChangeQueue = xQueueCreate(10, sizeof(PriceChangeRequest));
 
   if (flashMutex == NULL || systemMutex == NULL || mqttQueue == NULL || logIdLossQueue == NULL || priceChangeQueue == NULL)
@@ -888,7 +888,7 @@ void mqttTask(void *parameter)
       {
         // Process MQTT queue
         PumpLog log;
-        if (xQueueReceive(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
+        if (xQueueReceive(mqttQueue, &log, pdMS_TO_TICKS(10)) == pdTRUE)
         {
           Serial.printf("Processing log %d\n", log.viTriLogData);
           sendMQTTData(log);
@@ -2144,11 +2144,11 @@ void readRS485Data(byte *buffer)
       ganLog(buffer, log);
         
       // kiểm tra mqttQueue có dữ liệu không
-      if (uxQueueMessagesWaiting(mqttQueue) > 0)
-      {
-        Serial.println("MQTT queue is not empty, skipping...");
-        return;
-      }
+      // if (uxQueueMessagesWaiting(mqttQueue) == 0)
+      // {
+      //   Serial.println("MQTT queue is empty, skipping...");
+      //   return;
+      // }
 
       if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
       {

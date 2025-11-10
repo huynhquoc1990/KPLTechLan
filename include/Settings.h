@@ -12,7 +12,7 @@
 #define RS485BaudRate       9600
 #define WIFI_TIMEOUT_MS     20000
 #define OUT1                15    // 15 bo A2
-#define OUT2                2     // 2  bo A2   , 18 Còi của bo ASR
+#define OUT2                18     // 2  bo A2   , 18 Còi của bo ASR
 // #define INPUT1              36
 #define RESET_CONFIG_PIN    0     // GPIO0 - nút BOOT trên ESP32, có thể thay đổi      
 #define FLASH_DATA_FILE "/log.bin" // File lưu dữ liệu log

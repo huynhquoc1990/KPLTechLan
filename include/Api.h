@@ -265,7 +265,7 @@ void callAPIServerGetLogLoss(void *param){
               if (counter > 0) {
                 DtaLogLoss dt;
                 dt.Logid = static_cast<int>(counter);
-                // Serial.println("Counter Loss: " + String(counter));
+                Serial.println("Counter Loss: " + String(counter));
                 if (xQueueSend(LogIdLossQueue, &dt, pdMS_TO_TICKS(100)) != pdPASS) {
                   Serial.println("IdLog node add");
                 }

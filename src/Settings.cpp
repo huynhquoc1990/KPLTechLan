@@ -1,4 +1,5 @@
 #include "Settings.h"
+#include <Arduino.h>
 
 // Define variables
 const char* configFile = "/config.txt";

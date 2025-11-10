@@ -31,12 +31,12 @@ inline void sendLogRequest(uint16_t logPosition) {
     // Gửi toàn bộ buffer
     Serial2.write(buffer, sizeof(buffer));
     // In dữ liệu để kiểm tra
-    Serial.println();
-    Serial.print("Data sent: ");
-    for (int i = 0; i < sizeof(buffer); i++) {
-        Serial.printf("0x%02X ", buffer[i]);
-    }
-    Serial.println();
+    // Serial.println();
+    // Serial.print("Data sent: ");
+    // for (int i = 0; i < sizeof(buffer); i++) {
+    //     Serial.printf("0x%02X ", buffer[i]);
+    // }
+    // Serial.println();
 }
 
 inline void sendStartupCommand() {
@@ -59,12 +59,12 @@ inline void sendStartupCommand() {
     
 
     // In dữ liệu gửi ra Serial Monitor (dạng hex)
-    Serial.println();
-    Serial.print("Data sent: ");
-    for (int i = 0; i < 5; i++) {
-        Serial.printf("0x%02X ", buffer[i]);
-    }
-    Serial.println();
+    // Serial.println();
+    // Serial.print("Data sent: ");
+    // for (int i = 0; i < 5; i++) {
+    //     Serial.printf("0x%02X ", buffer[i]);
+    // }
+    // Serial.println();
 }
 
 
