@@ -30,6 +30,15 @@ struct PriceChangeRequest {
     char idChiNhanh[20];   // IDChiNhanh for response publishing
 };
 
+// Struct for price change response (from RS485)
+struct PriceChangeResponse {
+    uint8_t deviceId;      // Device ID that responded (11-20)
+    char status;           // 'S' = Success, 'E' = Error
+    float unitPrice;       // Unit price from original request
+    char idDevice[20];     // IdDevice from original request
+    char idChiNhanh[20];   // IDChiNhanh from original request
+};
+
 // Struct for storing nozzle prices in Flash (10 nozzles: 11-20)
 struct NozzlePrice {
     char idDevice[20];     // IdDevice (e.g., "QA-T01-V01")

@@ -48,11 +48,4 @@ void sendLogRequest(unsigned int logPosition)
 
     // Gửi toàn bộ buffer
     Serial2.write(buffer, sizeof(buffer));
-    // In dữ liệu để kiểm tra
-    // Serial.println();
-    // Serial.print("Data sent: ");
-    // for (int i = 0; i < sizeof(buffer); i++) {
-    //     Serial.printf("0x%02X ", buffer[i]);
-    // }
-    // Serial.println();
 }

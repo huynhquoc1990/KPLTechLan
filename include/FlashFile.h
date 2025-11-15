@@ -480,7 +480,8 @@ inline uint8_t calculateNozzlePricesChecksum(const NozzlePrices &data) {
 
 // Load nozzle prices from Flash
 inline bool loadNozzlePrices(NozzlePrices &prices, SemaphoreHandle_t flashMutex) {
-    if (xSemaphoreTake(flashMutex, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+    // Short timeout for read operations to avoid blocking MQTT callback
+    if (xSemaphoreTake(flashMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
         File file = LittleFS.open(NOZZLE_PRICES_FILE, "r");
         if (!file) {
             Serial.println("[FLASH] Nozzle prices file not found, initializing defaults...");
@@ -524,7 +525,8 @@ inline bool loadNozzlePrices(NozzlePrices &prices, SemaphoreHandle_t flashMutex)
 
 // Save nozzle prices to Flash
 inline bool saveNozzlePrices(const NozzlePrices &prices, SemaphoreHandle_t flashMutex) {
-    if (xSemaphoreTake(flashMutex, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+    // Very long timeout for price operations to guarantee success (was 500ms)
+    if (xSemaphoreTake(flashMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         File file = LittleFS.open(NOZZLE_PRICES_FILE, "w");
         if (!file) {
             Serial.println("[FLASH] ✗ Failed to open nozzle prices file for writing");

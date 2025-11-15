@@ -81,5 +81,6 @@ extern MQTTManager* mqttManager;
 void setupMQTTTopics();
 void connectMQTT();
 void sendMQTTData(const PumpLog &log);
+void readLogFromFlash(uint32_t logId);
 
 #endif // MQTT_MANAGER_H

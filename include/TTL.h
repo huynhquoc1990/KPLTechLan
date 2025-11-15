@@ -201,13 +201,14 @@ inline void sendSetTimeCommand(TimeSetup *time) {
 
     // Gửi lệnh qua RS485
     Serial2.write(buffer, 10); // Gửi 10 byte dữ liệu
-    delayMicroseconds(150); // Thêm độ trễ nhỏ để đảm bảo dữ liệu được gửi đi
+    Serial2.flush(); // Đợi cho đến khi toàn bộ dữ liệu được truyền đi
+    // delayMicroseconds(150); // Thêm độ trễ nhỏ để đảm bảo dữ liệu được gửi đi
     
     // In dữ liệu lệnh để debug
     Serial.printf("Command Sent to ID %d: ", 99);
     for (int i = 0; i < 10; i++) {
-        Serial.printf("0x%02X ", buffer[i]);
-        delayMicroseconds(100); // Thêm độ trễ nhỏ giữa các byte để tránh lỗi truyền
+        Serial.printf("%d ", buffer[i]);
+        // delayMicroseconds(100); // Thêm độ trễ nhỏ giữa các byte để tránh lỗi truyền
     }
     Serial.println();
     readResponse(); // Đọc phản hồi từ thiết bị

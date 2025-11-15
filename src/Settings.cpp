@@ -30,5 +30,9 @@ const char* TopicOTA      = "/OTA/";
 const char* TopicUpdatePrice = "/UpdatePrice";
 const char* TopicGetPrice = "/GetPrice";
 const char* TopicRequestLog = "/RequestLog";
+// sửa thông tin phiên bản hardware vào đây
+const char* hardwareVersion = "KC868-A2-1305"; // KC868-A2-1305 là phiên bản hardware của thiết bị
+// KC868-A2-1305 là phiên bản hardware của thiết bị
+// KC868-A2-1305 là phiên bản hardware của thiết bị
 
 const uint8_t idVoiList[] = {99};

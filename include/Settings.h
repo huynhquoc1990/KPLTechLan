@@ -6,8 +6,8 @@
 // Include credentials từ file riêng
 #include "Credentials.h"
 // Thông số của RS485
-#define RX_PIN              35//16-ASR // 35 34  13./ bo ISOlated màu đen: 17 / bo KC868: 13
-#define TX_PIN              32 //17-ASR //32 13   5. / bo ISOlated màu đen: 16 / bo KC868: 5
+#define RX_PIN              13//16-ASR // 35 34  13./ bo ISOlated màu đen: 17 / bo KC868: 13
+#define TX_PIN              5 //17-ASR //32 13   5. / bo ISOlated màu đen: 16 / bo KC868: 5
 #define ITEM_SIZE_RS485     125
 #define RS485BaudRate       9600
 #define WIFI_TIMEOUT_MS     20000
@@ -74,6 +74,6 @@ extern const char* TopicGetPrice; // Topic to request current prices
 extern const char* TopicRequestLog; // Topic to request logs from Flash
 
 extern const uint8_t idVoiList[]; // Thêm các ID vòi khác tại đây
-
+extern const char* hardwareVersion;
 
 #endif // STRUCTDATA_H
