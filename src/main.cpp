@@ -179,7 +179,7 @@ void publishPriceChangeSuccess(uint8_t deviceId, const char *idDevice, float uni
 // MAIN SETUP & LOOP
 // ============================================================================
 
-// dùng để kiểm tra có phát sinh giao dịch ko, nếu có reset biến này. và 60 phút nếu không có giao dịch thì restart esp
+// dùng để kiểm tra có phát sinh giao dịch ko, nếu có reset biến này. và 30 phút nếu không có giao dịch thì restart esp
 unsigned long checkLogSend = 0;
 
 void setup()
@@ -435,7 +435,7 @@ void systemInit()
 
   // Send startup commands
   sendStartupCommand();
-  delay(1000);
+  delay(2000);
   sendStartupCommand();
 
   Serial.printf("System initialized - Current ID: %u\n", currentId);
@@ -489,17 +489,17 @@ void systemCheck()
       }
     }
 
-    // Safe auto-restart after 60 minutes of no logs
+    // Safe auto-restart after 30 minutes of no logs
     checkLogSend++;
-    if (checkLogSend >= 360) // 360 * 10s = 3600s = 60 minutes
+    if (checkLogSend >= 180) // 180 * 10s = 1800s = 30 minutes
     {
-      Serial.printf("No logs received for 60 minutes (%lu checks) - initiating safe restart...\n", checkLogSend);
+      Serial.printf("No logs received for 30 minutes (%lu checks) - initiating safe restart...\n", checkLogSend);
 
       // Check if safe to restart
       if (Update.isRunning())
       {
         Serial.println("⚠️ OTA in progress - postponing restart");
-        checkLogSend = 350; // Retry in 100 seconds
+        checkLogSend = 170; // Retry in 100 seconds (30 min = 180, retry at 170)
         return;
       }
 
@@ -507,7 +507,7 @@ void systemCheck()
       {
         Serial.printf("⚠️ MQTT queue has %d pending logs - postponing restart\n",
                       uxQueueMessagesWaiting(mqttQueue));
-        checkLogSend = 350; // Retry in 100 seconds
+        checkLogSend = 170; // Retry in 100 seconds (30 min = 180, retry at 170)
         return;
       }
 
@@ -516,14 +516,14 @@ void systemCheck()
       {
         Serial.printf("⚠️ LogLoss queue has %d pending requests - postponing restart\n",
                       uxQueueMessagesWaiting(logIdLossQueue));
-        checkLogSend = 350; // Retry in 100 seconds
+        checkLogSend = 170; // Retry in 100 seconds (30 min = 180, retry at 170)
         return;
       }
 
       if (xSemaphoreTake(flashMutex, 0) != pdTRUE)
       {
         Serial.println("⚠️ Flash is busy - postponing restart");
-        checkLogSend = 350; // Retry in 100 seconds
+        checkLogSend = 170; // Retry in 100 seconds (30 min = 180, retry at 170)
         return;
       }
       xSemaphoreGive(flashMutex);
@@ -2716,6 +2716,8 @@ void readRS485Data(byte *buffer)
         if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(100)) == pdTRUE)
         {
           Serial.println("Log data queued for MQTT");
+          // Reset checkLogSend khi có giao dịch mới
+          checkLogSend = 0;
           // Trigger relay
           xTaskCreate(ConnectedKPLBox, "ConnectedKPLBox", 1024, NULL, 4, NULL);
         }
