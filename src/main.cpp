@@ -1057,6 +1057,7 @@ void mqttTask(void *parameter)
         mqttClient.unsubscribe(topicUpdatePrice);
         mqttClient.unsubscribe(topicGetPrice);
         mqttClient.unsubscribe(topicRequestLog);
+        mqttClient.unsubscribe(topicSetupPrinter);
         mqttClient.disconnect();
         mqttSubscribed = false;
         Serial.println("MQTT cleanup completed");
@@ -1389,6 +1390,7 @@ void setupMQTTTopics()
   snprintf(fullTopic, sizeof(fullTopic), "%s%s%s", companyInfo.Mst, TopicSendData, TopicMqtt);
   snprintf(topicStatus, sizeof(topicStatus), "%s%s%s", companyInfo.Mst, TopicStatus, TopicMqtt);
   snprintf(topicError, sizeof(topicError), "%s%s%s", companyInfo.Mst, TopicLogError, TopicMqtt);
+
   // wildcard subscribe to all device ids under Error channel
   snprintf(topicErrorSub, sizeof(topicErrorSub), "%s%s#", companyInfo.Mst, TopicLogError);
   // prefix for quick check in callback
@@ -1400,6 +1402,7 @@ void setupMQTTTopics()
   snprintf(topicOTA, sizeof(topicOTA), "%s/OTA/%s", companyInfo.Mst, TopicMqtt);
 
   snprintf(topicUpdatePrice, sizeof(topicUpdatePrice), "%s%s", companyInfo.CompanyId, TopicUpdatePrice);
+  snprintf(topicSetupPrinter, sizeof(topicSetupPrinter), "%s%s", companyInfo.CompanyId, TopicSetupPrinter);
   snprintf(topicGetPrice, sizeof(topicGetPrice), "%s%s", companyInfo.Mst, TopicGetPrice);
   snprintf(topicRequestLog, sizeof(topicRequestLog), "%s%s", companyInfo.CompanyId, TopicRequestLog);
   // snprintf(topicUpdatePrice, sizeof(topicUpdatePrice), "%s%s%s", companyInfo.CompanyId, TopicUpdatePrice);
@@ -1421,6 +1424,7 @@ void setupMQTTTopics()
     bool sub7 = mqttClient.subscribe(topicUpdatePrice);
     bool sub8 = mqttClient.subscribe(topicGetPrice);
     bool sub9 = mqttClient.subscribe(topicRequestLog);
+    bool sub10 = mqttClient.subscribe(topicSetupPrinter);
 
     Serial.printf("Subscription results:\n");
     Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
@@ -1432,10 +1436,11 @@ void setupMQTTTopics()
     Serial.printf("  UpdatePrice (%s): %s\n", topicUpdatePrice, sub7 ? "SUCCESS" : "FAILED");
     Serial.printf("  GetPrice (%s): %s\n", topicGetPrice, sub8 ? "SUCCESS" : "FAILED");
     Serial.printf("  RequestLog (%s): %s\n", topicRequestLog, sub9 ? "SUCCESS" : "FAILED");
+    Serial.printf("  SetupPrinter (%s): %s\n", topicSetupPrinter, sub10 ? "SUCCESS" : "FAILED");
     Serial.println("=== SUBSCRIPTION COMPLETE ===");
 
     // Set subscription flag
-    mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7 && sub8 && sub9);
+    mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7 && sub8 && sub9 && sub10);
     Serial.printf("MQTT subscription state: %s\n", mqttSubscribed ? "SUBSCRIBED" : "PARTIAL_FAILURE");
   }
   else
@@ -1475,6 +1480,7 @@ void connectMQTT()
       bool sub7 = mqttClient.subscribe(topicUpdatePrice);
       bool sub8 = mqttClient.subscribe(topicGetPrice);
       bool sub9 = mqttClient.subscribe(topicRequestLog);
+      bool sub10 = mqttClient.subscribe(topicSetupPrinter);
 
       Serial.printf("Re-subscription results:\n");
       Serial.printf("  Error (%s): %s\n", topicError, sub1 ? "SUCCESS" : "FAILED");
@@ -1486,10 +1492,11 @@ void connectMQTT()
       Serial.printf("  UpdatePrice (%s): %s\n", topicUpdatePrice, sub7 ? "SUCCESS" : "FAILED");
       Serial.printf("  GetPrice (%s): %s\n", topicGetPrice, sub8 ? "SUCCESS" : "FAILED");
       Serial.printf("  RequestLog (%s): %s\n", topicRequestLog, sub9 ? "SUCCESS" : "FAILED");
+      Serial.printf("  SetupPrinter (%s): %s\n", topicSetupPrinter, sub10 ? "SUCCESS" : "FAILED");
       Serial.println("=== RE-SUBSCRIPTION COMPLETE ===");
 
       // Set subscription flag
-      mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7 && sub8 && sub9);
+      mqttSubscribed = (sub1 && sub2 && sub3 && sub4 && sub5 && sub6 && sub7 && sub8 && sub9 && sub10);
       Serial.printf("MQTT re-subscription state: %s\n", mqttSubscribed ? "SUBSCRIBED" : "PARTIAL_FAILURE");
 
       // Publish saved prices from Flash after successful MQTT connection
@@ -1566,10 +1573,30 @@ void sendDeviceStatus()
   }
 }
 
+
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
   DEBUG_PRINTF("=== MQTT CALLBACK TRIGGERED ===\n");
   DEBUG_PRINTF("Topic: %s\n", topic);
+
+  // Handle SetupPrinter command
+  if (strcmp(topic, topicSetupPrinter) == 0)
+  {
+    Serial.println("SetupPrinter command received - parsing payload...");
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, payload, length);
+    if (error)
+    {
+      Serial.printf("SetupPrinter: JSON parse error: %s\n", error.c_str());
+      setSystemStatus("ERROR", "SetupPrinter: Invalid JSON payload");
+      return;
+    }
+    Serial.println("SetupPrinter command received - parsing payload...");
+    const char *nameTypeOil = doc["nameTypeOil"];
+    Serial.println("NameTypeOil: " + String(nameTypeOil));
+
+
+  }
 
   // Handle Restart command
   if (strcmp(topic, topicRestart) == 0)

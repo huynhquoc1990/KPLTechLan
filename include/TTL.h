@@ -5,6 +5,12 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+inline void sendSetupPrinterCommandTenDonVi(String nameTypeOil) {
+  // Gửi lệnh SET thời gian
+  sendSetTimeCommand(time);
+  
+}
+
 inline void sendLogRequest(uint16_t logPosition) {
     // Kiểm tra giới hạn vị trí log
     if (logPosition < 1 || logPosition > 2046) {
@@ -30,13 +36,6 @@ inline void sendLogRequest(uint16_t logPosition) {
 
     // Gửi toàn bộ buffer
     Serial2.write(buffer, sizeof(buffer));
-    // In dữ liệu để kiểm tra
-    // Serial.println();
-    // Serial.print("Data sent: ");
-    // for (int i = 0; i < sizeof(buffer); i++) {
-    //     Serial.printf("0x%02X ", buffer[i]);
-    // }
-    // Serial.println();
 }
 
 inline void sendStartupCommand() {
