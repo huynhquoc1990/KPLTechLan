@@ -5,11 +5,77 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-inline void sendSetupPrinterCommandTenDonVi(String nameTypeOil) {
+// command for setup printer: type nhienlieu
+inline void sendSetupPrinterCommandNhienLieu(String nhienlieu, uint8_t address) {
   // Gửi lệnh SET thời gian
-  sendSetTimeCommand(time);
-  
+  uint8_t buffer[22];
+  buffer[0] = 0x01;
+  buffer[1] = 0x02;
+  buffer[2] = '@'; // Write
+  buffer[3] = address;
+  for (int i = 0; i < 16; i++) {
+    if (i < nhienlieu.length()) {
+      buffer[i + 4] = nhienlieu.charAt(i);
+    } else {
+      buffer[i + 4] = '0'; // Pad with 0 if string is shorter
+    }
+  }  
+  buffer[20] = 0x03;
+  buffer[21] = 0x04;
+  Serial2.write(buffer, sizeof(buffer));
+  Serial2.flush();
 }
+
+inline void sendSetupPrinterCommandTenDonVi(String tendonvi, String address) {
+  // Gửi lệnh SET thời gian
+  uint8_t buffer[66];
+  buffer[0] = 0x01;
+  buffer[1] = 0x02;
+  buffer[2] = 'W'; // Write
+
+  // Copy tendonvi string characters (up to 32 bytes) to buffer positions 3-34
+  for (int i = 0; i < 32; i++) {
+    if (i < tendonvi.length()) {
+      buffer[i + 3] = tendonvi.charAt(i);
+    } else {
+      buffer[i + 3] = 0; // Pad with 0 if string is shorter
+    }
+  }
+  // Copy address string characters (up to 29 bytes) to buffer positions 35-63
+  for (int i = 0; i < 29; i++) {
+    if (i < address.length()) {
+      buffer[i + 35] = address.charAt(i);
+    } else {
+      buffer[i + 35] = '0'; // Pad with 0 if string is shorter
+    }
+  }
+  buffer[64] = 0x03;
+  buffer[65] = 0x04;
+  Serial2.write(buffer, sizeof(buffer));
+  Serial2.flush();
+}
+
+// set mst to printer
+inline void sendSetupPrinterCommandMst(String mst) {
+  // Gửi lệnh SET thời gian
+  uint8_t buffer[23];
+  buffer[0] = 0x01;
+  buffer[1] = 0x02;
+  buffer[2] = '#'; // Write
+  // Copy mst string characters (up to 18 bytes) to buffer positions 3-20
+  for (int i = 0; i < 18; i++) {
+    if (i < mst.length()) {
+      buffer[i + 3] = mst.charAt(i);
+    } else {
+      buffer[i + 3] = '0'; // Pad with 0 if string is shorter
+    }
+  }
+  buffer[21] = 0x03;
+  buffer[22] = 0x04;
+  Serial2.write(buffer, sizeof(buffer));
+  Serial2.flush();
+}
+
 
 inline void sendLogRequest(uint16_t logPosition) {
     // Kiểm tra giới hạn vị trí log

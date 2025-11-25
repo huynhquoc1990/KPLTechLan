@@ -94,6 +94,7 @@ static char topicOTA[64];         // topic for OTA firmware update
 static char topicUpdatePrice[64]; // topic for changing price
 static char topicGetPrice[64];    // topic for requesting current prices
 static char topicRequestLog[64];  // topic for requesting logs from Flash
+static char topicSetupPrinter[64]; // topic for setting name type of oil
 
 // FreeRTOS objects
 static QueueHandle_t mqttQueue = NULL;
@@ -1592,10 +1593,21 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       return;
     }
     Serial.println("SetupPrinter command received - parsing payload...");
-    const char *nameTypeOil = doc["nameTypeOil"];
-    Serial.println("NameTypeOil: " + String(nameTypeOil));
+    const char *nameType = doc["nametype"];
+    Serial.println("Nametype: " + String(nameType));
 
-
+    if (strcmp(nameType, "TenDonVi") == 0){
+      // set ten don vi to printer
+      sendSetupPrinterCommandTenDonVi(doc["tendonvi"], doc["address"]);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      //set mst to printer
+      sendSetupPrinterCommandMst(companyInfo.Mst);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+    }else if (strcmp(nameType, "NhienLieu") == 0){
+      // set nhien lieu to printer
+      sendSetupPrinterCommandNhienLieu(doc["nhienlieu"], doc["address"]);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+    }
   }
 
   // Handle Restart command
