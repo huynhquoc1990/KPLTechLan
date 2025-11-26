@@ -8,29 +8,32 @@
 // command for setup printer: type nhienlieu
 inline void sendSetupPrinterCommandNhienLieu(String nhienlieu, uint8_t address) {
   // Gửi lệnh SET thời gian
-  uint8_t buffer[22];
-  buffer[0] = 0x01;
-  buffer[1] = 0x02;
+  uint8_t buffer[23];
+  buffer[0] = 1;
+  buffer[1] = 2;
   buffer[2] = '@'; // Write
-  buffer[3] = address;
-  for (int i = 0; i < 16; i++) {
+  // convert address to hex
+  String addressHex = String(address, HEX);
+  char addressHexChar = addressHex.charAt(0);
+  buffer[3] = (uint8_t)addressHexChar;
+  for (int i = 0; i <= 16; i++) {
     if (i < nhienlieu.length()) {
       buffer[i + 4] = nhienlieu.charAt(i);
     } else {
-      buffer[i + 4] = '0'; // Pad with 0 if string is shorter
+      buffer[i + 4] = ' '; // Pad with 0 if string is shorter
     }
   }  
-  buffer[20] = 0x03;
-  buffer[21] = 0x04;
+  buffer[21] = 3;
+  buffer[22] = 4;
   Serial2.write(buffer, sizeof(buffer));
   Serial2.flush();
 }
 
 inline void sendSetupPrinterCommandTenDonVi(String tendonvi, String address) {
   // Gửi lệnh SET thời gian
-  uint8_t buffer[66];
-  buffer[0] = 0x01;
-  buffer[1] = 0x02;
+  uint8_t buffer[67];
+  buffer[0] = 1;
+  buffer[1] = 2;
   buffer[2] = 'W'; // Write
 
   // Copy tendonvi string characters (up to 32 bytes) to buffer positions 3-34
@@ -38,19 +41,19 @@ inline void sendSetupPrinterCommandTenDonVi(String tendonvi, String address) {
     if (i < tendonvi.length()) {
       buffer[i + 3] = tendonvi.charAt(i);
     } else {
-      buffer[i + 3] = 0; // Pad with 0 if string is shorter
+      buffer[i + 3] = ' '; // Pad with space if string is shorter
     }
   }
-  // Copy address string characters (up to 29 bytes) to buffer positions 35-63
-  for (int i = 0; i < 29; i++) {
+  // Copy address string characters (up to 30 bytes) to buffer positions 35-64
+  for (int i = 0; i < 30; i++) {
     if (i < address.length()) {
       buffer[i + 35] = address.charAt(i);
     } else {
-      buffer[i + 35] = '0'; // Pad with 0 if string is shorter
+      buffer[i + 35] = ' '; // Pad with space if string is shorter
     }
   }
-  buffer[64] = 0x03;
-  buffer[65] = 0x04;
+  buffer[65] = 3;
+  buffer[66] = 4;
   Serial2.write(buffer, sizeof(buffer));
   Serial2.flush();
 }
@@ -59,19 +62,19 @@ inline void sendSetupPrinterCommandTenDonVi(String tendonvi, String address) {
 inline void sendSetupPrinterCommandMst(String mst) {
   // Gửi lệnh SET thời gian
   uint8_t buffer[23];
-  buffer[0] = 0x01;
-  buffer[1] = 0x02;
+  buffer[0] = 1;
+  buffer[1] = 2;
   buffer[2] = '#'; // Write
   // Copy mst string characters (up to 18 bytes) to buffer positions 3-20
   for (int i = 0; i < 18; i++) {
     if (i < mst.length()) {
       buffer[i + 3] = mst.charAt(i);
     } else {
-      buffer[i + 3] = '0'; // Pad with 0 if string is shorter
+      buffer[i + 3] = ' '; // Pad with 0 if string is shorter
     }
   }
-  buffer[21] = 0x03;
-  buffer[22] = 0x04;
+  buffer[21] = 3;
+  buffer[22] = 4;
   Serial2.write(buffer, sizeof(buffer));
   Serial2.flush();
 }

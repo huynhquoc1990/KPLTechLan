@@ -1581,6 +1581,8 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   DEBUG_PRINTF("Topic: %s\n", topic);
 
   // Handle SetupPrinter command
+  // json payload OF SETUP NHIENLIEU: {"IDChiNhanh":"1402119649","Type":"TenNhienLieu","TenChiNhanh":"CONG TY TNHH XANG DÀU NGUYẼN THANH PHONG","ThongTinVoi":[{"IdVoi":"TPHO-1","IdSoVoi":"1","TenNhienLieu":"Dau Diezen 0,05S Muc 2"},{"IdVoi":"TPHO-2","IdSoVoi":"2","TenNhienLieu":"Xang Ron 95 Muc 3"},{"IdVoi":"TPHO-3","IdSoVoi":"3","TenNhienLieu":"Xang Ron 95 Muc 3"},{"IdVoi":"TPHO-4","IdSoVoi":"4","TenNhienLieu":"Dau Diezen 0.001S Muc 5"}]}
+  // json payload OF SETUP TEN DON VI: { "IDChiNhanh": "11223311A", "Type": "tendonvi", "TenChiNhanh": "Chi nhánh 01 Cty Quốc Anh", "Mst": "1201655671", "Ten": "CÔNG TY TNHH QUỐC ANH", "Addr": "ĐỊA CHỈ NHÀ SỐ " }
   if (strcmp(topic, topicSetupPrinter) == 0)
   {
     Serial.println("SetupPrinter command received - parsing payload...");
@@ -1593,20 +1595,37 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       return;
     }
     Serial.println("SetupPrinter command received - parsing payload...");
-    const char *nameType = doc["nametype"];
-    Serial.println("Nametype: " + String(nameType));
+    const char *nameType = doc["Type"];
+    Serial.println("Type: " + String(nameType));
 
-    if (strcmp(nameType, "TenDonVi") == 0){
+    if (strcmp(nameType, "tendonvi") == 0){
       // set ten don vi to printer
-      sendSetupPrinterCommandTenDonVi(doc["tendonvi"], doc["address"]);
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      Serial.println("Setting up ten don vi to printer...");
+        // Serial.println("TenChiNhanh: " + doc["TenChiNhanh"].as<String>());
+        // Serial.println("Addr: " + doc["Addr"].as<String>());
+      sendSetupPrinterCommandTenDonVi(doc["TenChiNhanh"], doc["Addr"]);
+      vTaskDelay(pdMS_TO_TICKS(400));
+      sendSetupPrinterCommandTenDonVi(doc["TenChiNhanh"], doc["Addr"]);
+      vTaskDelay(pdMS_TO_TICKS(400));
       //set mst to printer
-      sendSetupPrinterCommandMst(companyInfo.Mst);
-      vTaskDelay(pdMS_TO_TICKS(1000));
-    }else if (strcmp(nameType, "NhienLieu") == 0){
-      // set nhien lieu to printer
-      sendSetupPrinterCommandNhienLieu(doc["nhienlieu"], doc["address"]);
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      Serial.println("Setting up mst to printer...");
+      // Serial.println("Mst: " + doc["Mst"].as<String>());
+      sendSetupPrinterCommandMst(doc["Mst"]);
+      vTaskDelay(pdMS_TO_TICKS(400));
+
+      for (JsonObject item : doc["ThongTinVoi"].as<JsonArray>()) {
+        const char *idVoi = item["IdVoi"];
+        const char *idSoVoi = item["IdSoVoi"];
+        const char *tenNhienLieu = item["TenNhienLieu"];
+        // Serial.println("IdVoi: " + String(idVoi));
+        // Serial.println("IdSoVoi: " + String(idSoVoi));
+        // Serial.println("TenNhienLieu: " + String(tenNhienLieu));
+        // set nhien lieu to printer
+        sendSetupPrinterCommandNhienLieu(tenNhienLieu, atoi(idSoVoi));
+        vTaskDelay(pdMS_TO_TICKS(400));
+        sendSetupPrinterCommandNhienLieu(tenNhienLieu, atoi(idSoVoi));
+        vTaskDelay(pdMS_TO_TICKS(400));
+      }
     }
   }
 
@@ -3497,7 +3516,7 @@ void printPartitionInfo()
     Serial.println("4. Đợi 5 phút để hoàn tất");
     Serial.println("\n⚠️ Thiết bị vẫn hoạt động NHƯNG KHÔNG LƯU LOG vào Flash");
     Serial.println("để tránh crash. Logs vẫn được gửi MQTT bình thường.");
-    Serial.println("\nHỗ trợ kỹ thuật: 0xxx-xxx-xxx (miễn phí)");
+    Serial.println("\nHỗ trợ kỹ thuật: 0702554966 (miễn phí)");
     Serial.println("═════════════════════════════════════════════════════════\n");
 
     // Disable flash writes to prevent crashes
