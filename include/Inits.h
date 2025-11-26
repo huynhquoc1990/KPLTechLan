@@ -124,6 +124,17 @@ inline void parsePayload_IdLogStatus(byte *payload, unsigned int length, DeviceG
 
 // Hàm để phân tích payload và gán vào struct GetIdLogLoss
 inline void parsePayload_IdLogLoss(byte *payload, unsigned int length, GetIdLogLoss *getLogIdLoss, CompanyInfo *companyInfo) {
+  // ✅ FIX: Validate parameters không null
+  if (!payload || !getLogIdLoss || !companyInfo) {
+    Serial.println("ERROR: Null pointer in parsePayload_IdLogLoss");
+    return;
+  }
+  
+  if (length == 0) {
+    Serial.println("ERROR: Payload length is 0");
+    return;
+  }
+  
   // Check heap before parsing
   size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
   Serial.printf("Heap before JSON parse: %u bytes, payload length: %u\n", freeHeap, length);

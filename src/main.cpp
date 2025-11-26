@@ -176,6 +176,48 @@ void processLogBatch(int batchSize);
 void saveLogToFlash(const PumpLog &log);
 void savePriceChangeWithRetry(uint8_t deviceId, const char *idDevice, float unitPrice, const char *idChiNhanh, NozzlePrices &prices, SemaphoreHandle_t flashMutex);
 void publishPriceChangeSuccess(uint8_t deviceId, const char *idDevice, float unitPrice, const char *idChiNhanh);
+
+// ============================================================================
+// HELPER FUNCTIONS - NULL SAFETY
+// ============================================================================
+
+// ✅ FIX: Safe string copy - validates source không null
+inline void safe_strncpy(char *dest, const char *src, size_t dest_size) {
+  if (!dest || dest_size == 0) {
+    Serial.println("ERROR: safe_strncpy - dest is null or size is 0");
+    return;
+  }
+  
+  if (!src || strlen(src) == 0) {
+    dest[0] = '\0'; // Set empty string
+    return;
+  }
+  
+  strncpy(dest, src, dest_size - 1);
+  dest[dest_size - 1] = '\0'; // Ensure null termination
+}
+
+// ✅ FIX: Safe queue send với validation
+inline bool safeQueueSend(QueueHandle_t queue, const void *item, 
+                           TickType_t timeout, const char *queueName) {
+  if (!queue) {
+    Serial.printf("ERROR: Queue '%s' is NULL!\n", queueName ? queueName : "unknown");
+    return false;
+  }
+  
+  if (!item) {
+    Serial.printf("ERROR: Item to send to queue '%s' is NULL!\n", queueName ? queueName : "unknown");
+    return false;
+  }
+  
+  if (xQueueSend(queue, item, timeout) != pdTRUE) {
+    Serial.printf("ERROR: Failed to send to queue '%s'\n", queueName ? queueName : "unknown");
+    return false;
+  }
+  
+  return true;
+}
+
 // ============================================================================
 // MAIN SETUP & LOOP
 // ============================================================================
@@ -313,15 +355,34 @@ void readMacEsp()
 
   // cần kiểm tra nội dung trả về nếu 'OK' thì đọc giá trị lên
   String response = http.getString();
+  
+  // ✅ FIX: Validate response không rỗng
+  if (response.length() == 0)
+  {
+    Serial.println("ERROR: Empty response from MAC validation API");
+    http.end();
+    return;
+  }
+  
   Serial.println("response: " + response);
   // check response có chứa 'OK' không [{"IsValid":true}]
   DynamicJsonDocument doc2(1024);
   DeserializationError error = deserializeJson(doc2, response);
+  
+  // ✅ FIX: Check error trước khi kiểm tra httpCode
+  if (error)
+  {
+    Serial.printf("Parse error: %s\n", error.c_str());
+    Serial.printf("Response was: %s\n", response.c_str());
+    http.end();
+    return;
+  }
+  
   Serial.println("error: " + String(error.c_str()));
 
-  if (error && httpCode != 200)
+  if (httpCode != 200)
   {
-    Serial.println("Parse error");
+    Serial.printf("HTTP error code: %d\n", httpCode);
     http.end();
     return;
   }
@@ -406,6 +467,16 @@ void systemInit()
 
   // Initialize WiFiManager
   wifiManager = new WiFiManager(&webServer);
+  
+  // ✅ FIX: Validate allocation success
+  if (!wifiManager)
+  {
+    Serial.println("CRITICAL ERROR: Failed to allocate WiFiManager!");
+    setSystemStatus("ERROR", "WiFiManager allocation failed");
+    ESP.restart(); // Cannot continue without WiFiManager
+  }
+  
+  Serial.println("WiFiManager initialized successfully");
 
   // Load system data
   readFlashSettings(flashMutex, deviceStatus, counterReset);
@@ -1387,6 +1458,18 @@ void setupMQTTTopics()
   // Wait for company info
   vTaskDelay(pdMS_TO_TICKS(4000));
 
+  // ✅ FIX: Validate companyInfo không rỗng trước khi dùng
+  if (strlen(companyInfo.Mst) == 0 || strlen(companyInfo.CompanyId) == 0)
+  {
+    Serial.println("ERROR: Company info is empty! Cannot setup MQTT topics.");
+    Serial.printf("MST: '%s', CompanyId: '%s'\n", companyInfo.Mst, companyInfo.CompanyId);
+    setSystemStatus("ERROR", "Empty company info");
+    return; // Không setup topics nếu company info rỗng
+  }
+
+  Serial.printf("Company info validated - MST: %s, ID: %s\n", 
+                companyInfo.Mst, companyInfo.CompanyId);
+
   // Build topics
   snprintf(fullTopic, sizeof(fullTopic), "%s%s%s", companyInfo.Mst, TopicSendData, TopicMqtt);
   snprintf(topicStatus, sizeof(topicStatus), "%s%s%s", companyInfo.Mst, TopicStatus, TopicMqtt);
@@ -1586,47 +1669,163 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   if (strcmp(topic, topicSetupPrinter) == 0)
   {
     Serial.println("SetupPrinter command received - parsing payload...");
-    DynamicJsonDocument doc(1024);
-    DeserializationError error = deserializeJson(doc, payload, length);
+    Serial.printf("[MQTT] Payload length: %u bytes\n", length);
+    
+    // Debug: Print first 200 chars of payload
+    if (length > 0) {
+      char preview[201];
+      size_t previewLen = (length < 200) ? length : 200;
+      memcpy(preview, payload, previewLen);
+      preview[previewLen] = '\0';
+      Serial.printf("[MQTT] Payload preview: %s%s\n", preview, (length > 200) ? "..." : "");
+    }
+    
+    // CRITICAL FIX: Create a COPY of the payload
+    // This prevents issues if the MQTT buffer is overwritten or modified during parsing
+    // ArduinoJson might use Zero-Copy mode if we pass mutable string, so having our own copy is safer
+    char* jsonCopy = (char*)malloc(length + 1);
+    if (!jsonCopy) {
+      Serial.println("[ERROR] Failed to allocate memory for JSON copy");
+      setSystemStatus("ERROR", "Memory allocation failed");
+      return;
+    }
+    memcpy(jsonCopy, payload, length);
+    jsonCopy[length] = '\0';
+    
+    DynamicJsonDocument doc(8192); // 8KB buffer
+    DeserializationError error = deserializeJson(doc, jsonCopy);
+    
     if (error)
     {
       Serial.printf("SetupPrinter: JSON parse error: %s\n", error.c_str());
+      Serial.printf("  Error code: %d\n", error.code());
+      Serial.printf("  Payload length: %u\n", length);
       setSystemStatus("ERROR", "SetupPrinter: Invalid JSON payload");
+      free(jsonCopy); // Free memory
       return;
     }
-    Serial.println("SetupPrinter command received - parsing payload...");
+    Serial.println("SetupPrinter: JSON parsed successfully");
+    
+    // Debug: Check if ThongTinVoi exists and its size
+    if (doc.containsKey("ThongTinVoi")) {
+      if (doc["ThongTinVoi"].is<JsonArray>()) {
+        Serial.printf("[DEBUG] ThongTinVoi is array with %d items\n", doc["ThongTinVoi"].as<JsonArray>().size());
+      } else if (doc["ThongTinVoi"].is<JsonObject>()) {
+        Serial.println("[DEBUG] ThongTinVoi exists but is an OBJECT (not array)");
+      } else if (doc["ThongTinVoi"].isNull()) {
+        Serial.println("[DEBUG] ThongTinVoi exists but is NULL");
+      } else {
+        Serial.println("[DEBUG] ThongTinVoi exists but is UNKNOWN type");
+      }
+    } else {
+      Serial.println("[DEBUG] ThongTinVoi key does NOT exist in JSON");
+    }
     const char *nameType = doc["Type"];
+    
+    // ✅ FIX: Validate nameType không null
+    if (!nameType || strlen(nameType) == 0)
+    {
+      Serial.println("[MQTT] SetupPrinter: Type is null/empty");
+      setSystemStatus("ERROR", "SetupPrinter: Missing Type field");
+      free(jsonCopy); // Free memory
+      return;
+    }
+    
     Serial.println("Type: " + String(nameType));
 
     if (strcmp(nameType, "tendonvi") == 0){
+      // Validate required fields before sending
+      if (!doc.containsKey("TenChiNhanh") || !doc.containsKey("Addr") || !doc.containsKey("Mst")) {
+        Serial.println("[MQTT] SetupPrinter: Missing required fields (TenChiNhanh/Addr/Mst)");
+        setSystemStatus("ERROR", "SetupPrinter: Missing required fields");
+        free(jsonCopy); // Free memory
+        return;
+      }
+      
+      String tenChiNhanh = doc["TenChiNhanh"].as<String>();
+      String addr = doc["Addr"].as<String>();
+      String mst = doc["Mst"].as<String>();
+      
+      // Check for "null" string (ArduinoJson returns "null" if field is null/missing)
+      if (tenChiNhanh == "null" || tenChiNhanh.length() == 0) {
+        Serial.println("[MQTT] SetupPrinter: TenChiNhanh is null/empty");
+        setSystemStatus("ERROR", "SetupPrinter: Invalid TenChiNhanh");
+        free(jsonCopy); // Free memory
+        return;
+      }
+      if (addr == "null" || addr.length() == 0) {
+        Serial.println("[MQTT] SetupPrinter: Addr is null/empty");
+        setSystemStatus("ERROR", "SetupPrinter: Invalid Addr");
+        free(jsonCopy); // Free memory
+        return;
+      }
+      if (mst == "null" || mst.length() == 0) {
+        Serial.println("[MQTT] SetupPrinter: Mst is null/empty");
+        setSystemStatus("ERROR", "SetupPrinter: Invalid Mst");
+        free(jsonCopy); // Free memory
+        return;
+      }
+      
       // set ten don vi to printer
       Serial.println("Setting up ten don vi to printer...");
-        // Serial.println("TenChiNhanh: " + doc["TenChiNhanh"].as<String>());
-        // Serial.println("Addr: " + doc["Addr"].as<String>());
-      sendSetupPrinterCommandTenDonVi(doc["TenChiNhanh"], doc["Addr"]);
-      vTaskDelay(pdMS_TO_TICKS(400));
-      sendSetupPrinterCommandTenDonVi(doc["TenChiNhanh"], doc["Addr"]);
-      vTaskDelay(pdMS_TO_TICKS(400));
+      Serial.printf("  TenChiNhanh: %s\n", tenChiNhanh.c_str());
+      Serial.printf("  Addr: %s\n", addr.c_str());
+      sendSetupPrinterCommandTenDonVi(tenChiNhanh, addr);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      
       //set mst to printer
       Serial.println("Setting up mst to printer...");
-      // Serial.println("Mst: " + doc["Mst"].as<String>());
-      sendSetupPrinterCommandMst(doc["Mst"]);
-      vTaskDelay(pdMS_TO_TICKS(400));
+      Serial.printf("  Mst: %s\n", mst.c_str());
+      sendSetupPrinterCommandMst(mst);
+      vTaskDelay(pdMS_TO_TICKS(1000));
 
-      for (JsonObject item : doc["ThongTinVoi"].as<JsonArray>()) {
-        const char *idVoi = item["IdVoi"];
-        const char *idSoVoi = item["IdSoVoi"];
-        const char *tenNhienLieu = item["TenNhienLieu"];
-        // Serial.println("IdVoi: " + String(idVoi));
-        // Serial.println("IdSoVoi: " + String(idSoVoi));
-        // Serial.println("TenNhienLieu: " + String(tenNhienLieu));
-        // set nhien lieu to printer
-        sendSetupPrinterCommandNhienLieu(tenNhienLieu, atoi(idSoVoi));
-        vTaskDelay(pdMS_TO_TICKS(400));
-        sendSetupPrinterCommandNhienLieu(tenNhienLieu, atoi(idSoVoi));
-        vTaskDelay(pdMS_TO_TICKS(400));
+      // Check if ThongTinVoi exists and is an array before processing
+      if (doc.containsKey("ThongTinVoi") && doc["ThongTinVoi"].is<JsonArray>()) {
+        Serial.printf("Processing %d fuel nozzles...\n", doc["ThongTinVoi"].as<JsonArray>().size());
+        
+        for (JsonObject item : doc["ThongTinVoi"].as<JsonArray>()) {
+          const char *idVoi = item["IdVoi"];
+          const char *idSoVoi = item["IdSoVoi"];
+          const char *tenNhienLieu = item["TenNhienLieu"];
+          
+          // ✅ FIX: Validate fields trước khi dùng
+          if (!idSoVoi || strlen(idSoVoi) == 0)
+          {
+            Serial.println("[MQTT] SetupPrinter: IdSoVoi is null/empty, skipping...");
+            continue;
+          }
+          if (!tenNhienLieu || strlen(tenNhienLieu) == 0)
+          {
+            Serial.println("[MQTT] SetupPrinter: TenNhienLieu is null/empty, skipping...");
+            continue;
+          }
+          
+          // Serial.println("IdVoi: " + String(idVoi));
+          // Serial.println("IdSoVoi: " + String(idSoVoi));
+          // Serial.println("TenNhienLieu: " + String(tenNhienLieu));
+          
+          // ✅ FIX: Validate atoi() result
+          int soVoi = atoi(idSoVoi);
+          if (soVoi == 0 && idSoVoi[0] != '0')
+          {
+            Serial.printf("[MQTT] SetupPrinter: Failed to parse IdSoVoi '%s', skipping...\n", idSoVoi);
+            continue;
+          }
+          
+          Serial.printf("Setting up nhien lieu to printer: %s, %d\n", tenNhienLieu, soVoi);
+          // set nhien lieu to printer
+          sendSetupPrinterCommandNhienLieu(tenNhienLieu, soVoi);
+          vTaskDelay(pdMS_TO_TICKS(1000));
+          // sendSetupPrinterCommandNhienLieu(tenNhienLieu, soVoi);
+          // vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+      } else {
+        Serial.println("[MQTT] SetupPrinter: ThongTinVoi is missing or empty, skipping fuel setup");
       }
     }
+    
+    // Always free the copy at the end
+    free(jsonCopy);
   }
 
   // Handle Restart command
@@ -1656,6 +1855,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     if (doc.containsKey("device"))
     {
       const char *targetDevice = doc["device"];
+      
+      // ✅ FIX: Validate targetDevice không null/empty
+      if (!targetDevice || strlen(targetDevice) == 0)
+      {
+        Serial.println("[OTA] Error: device field is null/empty");
+        setSystemStatus("ERROR", "OTA: Invalid device field");
+        return;
+      }
+      
       if (strcmp(targetDevice, TopicMqtt) != 0)
       {
         Serial.printf("OTA: Update not for this device (target: %s, this: %s)\n", targetDevice, TopicMqtt);
@@ -1668,6 +1876,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     {
       String apiEndpoint = doc["api"].as<String>();
       String ftpUrl = doc["ftpUrl"].as<String>();
+      
+      // ✅ FIX: Validate không rỗng
+      if (apiEndpoint.length() == 0 || ftpUrl.length() == 0)
+      {
+        Serial.println("[OTA] Error: api or ftpUrl is empty");
+        setSystemStatus("ERROR", "OTA: Missing api/ftpUrl");
+        return;
+      }
+      
       Serial.println("[MQTT] Received OTA command via API");
       performOTAUpdateViaAPI(apiEndpoint, ftpUrl);
       return;
@@ -1677,6 +1894,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     if (doc.containsKey("url"))
     {
       const char *firmwareURL = doc["url"];
+      
+      // ✅ FIX: Validate firmwareURL không null/empty
+      if (!firmwareURL || strlen(firmwareURL) == 0)
+      {
+        Serial.println("[OTA] Error: url field is null/empty");
+        setSystemStatus("ERROR", "OTA: Invalid url field");
+        return;
+      }
+      
       Serial.println("[MQTT] Received OTA command via Direct URL");
       performOTAUpdate(firmwareURL);
       return;
@@ -1819,8 +2045,28 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       const char *idDevice = item["IdDevice"] | "";
       const char *nozzorle = item["Nozzorle"] | "";
 
+      // ✅ FIX: Validate không null và không rỗng trước khi dùng
+      if (!idChiNhanh || strlen(idChiNhanh) == 0)
+      {
+        Serial.println("[MQTT] Error: IDChiNhanh is null/empty, skipping...");
+        skipped++;
+        continue;
+      }
+      if (!idDevice || strlen(idDevice) == 0)
+      {
+        Serial.println("[MQTT] Error: IdDevice is null/empty, skipping...");
+        skipped++;
+        continue;
+      }
+      if (!nozzorle || strlen(nozzorle) == 0)
+      {
+        Serial.println("[MQTT] Error: Nozzorle is null/empty, skipping...");
+        skipped++;
+        continue;
+      }
+
       // Check if this is for current company (compare IDChiNhanh with MST)
-      if (strlen(idChiNhanh) > 0 && strcmp(idChiNhanh, companyInfo.Mst) != 0)
+      if (strcmp(idChiNhanh, companyInfo.Mst) != 0)
       {
         DEBUG_PRINTF("[MQTT] Skipping - IDChiNhanh=%s doesn't match MST=%s\n", idChiNhanh, companyInfo.Mst);
         skipped++;
@@ -1838,24 +2084,32 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       }
 
       float unitPrice = item["UnitPrice"] | 0.0f;
+      
+      // ✅ FIX: Validate UnitPrice không phải NaN/Infinity
+      if (isnan(unitPrice) || isinf(unitPrice) || unitPrice < 0)
+      {
+        Serial.printf("[MQTT] Error: UnitPrice is invalid (NaN/Inf/negative): %.2f, skipping...\n", unitPrice);
+        skipped++;
+        continue;
+      }
+      
       DEBUG_PRINTF("[MQTT] UnitPrice=%.2f\n", unitPrice);
 
       // Use Nozzorle field as RS485 Device ID directly
       // Nozzorle is provided as string (e.g., "11", "12", "13", ..., "20")
-      if (strlen(nozzorle) == 0)
-      {
-        Serial.printf("[MQTT] Error: Missing Nozzorle field for IdDevice=%s, skipping...\n", idDevice);
-        skipped++;
-        continue;
-      }
-
       // Parse Nozzorle to integer (already RS485 Device ID)
       uint8_t deviceIdNum = atoi(nozzorle);
 
-      // Validate range (11-20)
+      // ✅ FIX: Validate range (11-20) - atoi() trả về 0 nếu parse fail
+      if (deviceIdNum == 0 && nozzorle[0] != '0')
+      {
+        Serial.printf("[MQTT] Error: Failed to parse Nozzorle '%s', skipping...\n", nozzorle);
+        skipped++;
+        continue;
+      }
       if (deviceIdNum < 11 || deviceIdNum > 20)
       {
-        Serial.printf("[MQTT] Invalid Nozzorle: %s (must be 11-20), skipping...\n", nozzorle);
+        Serial.printf("[MQTT] Invalid Nozzorle: %s (parsed=%d, must be 11-20), skipping...\n", nozzorle, deviceIdNum);
         skipped++;
         continue;
       }
@@ -1866,13 +2120,13 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       PriceChangeRequest request;
       request.deviceId = deviceIdNum;
       request.unitPrice = unitPrice;
-      strncpy(request.idDevice, idDevice, sizeof(request.idDevice) - 1);
-      request.idDevice[sizeof(request.idDevice) - 1] = '\0'; // Ensure null termination
-      strncpy(request.idChiNhanh, idChiNhanh, sizeof(request.idChiNhanh) - 1);
-      request.idChiNhanh[sizeof(request.idChiNhanh) - 1] = '\0'; // Ensure null termination
+      // ✅ FIX: Use safe_strncpy
+      safe_strncpy(request.idDevice, idDevice, sizeof(request.idDevice));
+      safe_strncpy(request.idChiNhanh, idChiNhanh, sizeof(request.idChiNhanh));
 
       // Queue the request for RS485 task to process
-      if (xQueueSend(priceChangeQueue, &request, pdMS_TO_TICKS(100)) == pdTRUE)
+      // ✅ FIX: Use safeQueueSend
+      if (safeQueueSend(priceChangeQueue, &request, pdMS_TO_TICKS(100), "priceChangeQueue"))
       {
         queued++;
         Serial.printf("[MQTT] ✓ Queued price change: IdDevice=%s -> PumpID=%d, Price=%.2f\n", idDevice, deviceIdNum, unitPrice);
@@ -2008,6 +2262,10 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     const char *idDevice = doc["IdDevice"] | "";
     uint16_t beginLog = doc["BeginLog"] | 0;
     uint16_t numsLog = doc["Numslog"] | 0;
+
+    // ✅ FIX: Validate không null trước khi dùng strcmp
+    if (!mst) mst = "";
+    if (!idDevice) idDevice = "";
 
     // Validate MST and IdDevice
     if (strlen(mst) == 0 || strcmp(mst, companyInfo.Mst) != 0)
@@ -2685,10 +2943,9 @@ void readRS485Data(byte *buffer)
           response.deviceId = deviceId;
           response.status = 'S';
           response.unitPrice = priceRequestCache[cacheIndex].unitPrice;
-          strncpy(response.idDevice, priceRequestCache[cacheIndex].idDevice, sizeof(response.idDevice) - 1);
-          response.idDevice[sizeof(response.idDevice) - 1] = '\0';
-          strncpy(response.idChiNhanh, priceRequestCache[cacheIndex].idChiNhanh, sizeof(response.idChiNhanh) - 1);
-          response.idChiNhanh[sizeof(response.idChiNhanh) - 1] = '\0';
+          // ✅ FIX: Use safe_strncpy
+          safe_strncpy(response.idDevice, priceRequestCache[cacheIndex].idDevice, sizeof(response.idDevice));
+          safe_strncpy(response.idChiNhanh, priceRequestCache[cacheIndex].idChiNhanh, sizeof(response.idChiNhanh));
           
           if (xQueueSend(priceResponseQueue, &response, pdMS_TO_TICKS(100)) == pdTRUE)
           {
@@ -2713,10 +2970,9 @@ void readRS485Data(byte *buffer)
           response.deviceId = deviceId;
           response.status = 'E';
           response.unitPrice = priceRequestCache[cacheIndex].unitPrice;
-          strncpy(response.idDevice, priceRequestCache[cacheIndex].idDevice, sizeof(response.idDevice) - 1);
-          response.idDevice[sizeof(response.idDevice) - 1] = '\0';
-          strncpy(response.idChiNhanh, priceRequestCache[cacheIndex].idChiNhanh, sizeof(response.idChiNhanh) - 1);
-          response.idChiNhanh[sizeof(response.idChiNhanh) - 1] = '\0';
+          // ✅ FIX: Use safe_strncpy
+          safe_strncpy(response.idDevice, priceRequestCache[cacheIndex].idDevice, sizeof(response.idDevice));
+          safe_strncpy(response.idChiNhanh, priceRequestCache[cacheIndex].idChiNhanh, sizeof(response.idChiNhanh));
           
           if (xQueueSend(priceResponseQueue, &response, 0) == pdTRUE)
           {
@@ -2896,10 +3152,16 @@ void sendPriceChangeCommand(const PriceChangeRequest &request)
 {
   // Cache request for response matching (deviceId 11-20 → index 0-9)
   int cacheIndex = request.deviceId - 11;
-  if (cacheIndex >= 0 && cacheIndex < 10)
+  
+  // ✅ FIX: Validate bounds trước khi access array
+  if (cacheIndex < 0 || cacheIndex >= 10)
   {
-    priceRequestCache[cacheIndex] = request;
+    Serial.printf("[PRICE CMD] ERROR: Invalid cacheIndex=%d for deviceId=%d (must be 11-20)\n", 
+                  cacheIndex, request.deviceId);
+    return; // Không gửi command nếu index invalid
   }
+  
+  priceRequestCache[cacheIndex] = request;
 
   Serial.printf("[PRICE CMD] Sending to DeviceID=%d, Price=%.2f\n",
                 request.deviceId, request.unitPrice);

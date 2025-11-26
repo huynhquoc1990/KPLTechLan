@@ -5,78 +5,198 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// command for setup printer: type nhienlieu
+// ============================================================================
+// SETUP PRINTER - ĐẶT NHIÊN LIỆU CHO TỪNG VÒI BƠM
+// ============================================================================
+// Protocol: Đặt Nhiên liệu cho từng vòi bơm (RON-95 là vòi 1)
+// Format: Send(1) + Send(2) + Send('@') + Send('1') + Send(Char n=0-16) + Send(3) + Send(4)
+// - Send(1), Send(2): Header decimal 1, 2
+// - Send('@'): Command ASCII '@' (64 decimal)
+// - Send('1'): Vòi ID - ASCII '1'-'9' hoặc 'A' cho vòi 10
+// - Send(Char n=0) đến Send(Char n=16): Tên nhiên liệu (17 ký tự) - GỬI TRỰC TIẾP BYTES
+// - Send(3), Send(4): Footer decimal 3, 4
+// 
+// Ví dụ từ doc (Vòi 1 - RON-95):
+// n=0 đến n=16 là: Tên Nhiên Liệu vòi 1= RON-95 là : 1 2 '@' '1' 'R' 'O' 'N' '-' '9' '5' ' ' ' ' '3' 4
+// Tổng: 23 bytes
 inline void sendSetupPrinterCommandNhienLieu(String nhienlieu, uint8_t address) {
-  // Gửi lệnh SET thời gian
+  // Validate input
+  if (!nhienlieu || nhienlieu.length() == 0) {
+    Serial.println("ERROR: sendSetupPrinterCommandNhienLieu - nhienlieu is empty");
+    return;
+  }
+  
+  // Validate address (Vòi ID: 1-10)
+  if (address < 1 || address > 10) {
+    Serial.printf("ERROR: sendSetupPrinterCommandNhienLieu - invalid address=%d (must be 1-10)\n", address);
+    return;
+  }
+  
+  // Build command buffer: Total 23 bytes
   uint8_t buffer[23];
-  buffer[0] = 1;
-  buffer[1] = 2;
-  buffer[2] = '@'; // Write
-  // convert address to hex
-  String addressHex = String(address, HEX);
-  char addressHexChar = addressHex.charAt(0);
-  buffer[3] = (uint8_t)addressHexChar;
-  for (int i = 0; i <= 16; i++) {
+  buffer[0] = 1;        // Send(1) - DECIMAL 1
+  buffer[1] = 2;        // Send(2) - DECIMAL 2
+  buffer[2] = '@';      // Send('@') - ASCII '@' (64 decimal)
+  
+  // Send(Char n = address) - Vòi ID (1-10) as ASCII '1'-'9' or 'A'
+  if (address <= 9) {
+    buffer[3] = '0' + address; // '1'-'9' (ASCII 49-57)
+  } else {
+    buffer[3] = 'A';            // 'A' (ASCII 65) for vòi 10
+  }
+  
+  // Send(Char n=0) to Send(Char n=16) - Tên nhiên liệu RAW BYTES (17 ký tự)
+  // Gửi trực tiếp bytes của string, không convert
+  for (int i = 0; i < 17; i++) {
     if (i < nhienlieu.length()) {
-      buffer[i + 4] = nhienlieu.charAt(i);
+      buffer[i + 4] = (uint8_t)nhienlieu.charAt(i); // Raw byte
     } else {
-      buffer[i + 4] = ' '; // Pad with 0 if string is shorter
+      buffer[i + 4] = ' '; // Pad with space (ASCII 32)
     }
-  }  
-  buffer[21] = 3;
-  buffer[22] = 4;
+  }
+  
+  buffer[21] = 3;       // Send(3) - DECIMAL 3
+  buffer[22] = 4;       // Send(4) - DECIMAL 4
+  
+  // Debug log with DECIMAL format
+  Serial.printf("[TTL] Set Nhiên Liệu - Vòi %d: %s\n", address, nhienlieu.c_str());
+  Serial.print("[TTL] Command (DECIMAL): ");
+  for (int i = 0; i < sizeof(buffer); i++) {
+    Serial.printf("%c ", buffer[i]);
+  }
+  Serial.println();
+  
+  // Send command
   Serial2.write(buffer, sizeof(buffer));
   Serial2.flush();
+  
+  Serial.println("[TTL] Command sent");
 }
 
+// ============================================================================
+// SETUP PRINTER - SET TÊN DOANH NGHIỆP VÀ ĐỊA CHỈ
+// ============================================================================
+// Protocol: Đặt Tên Doanh Nghiệp và Địa chỉ cho máy in
+// Format: Send(1) + Send(2) + Send('W') + Send(Char n=0-31) + Send(Char n=32-61) + Send(3) + Send(4)
+// - Send(1), Send(2): Header decimal 1, 2
+// - Send('W'): Command ASCII 'W' (87 decimal)
+// - Send(Char n=0 đến n=31): Tên Doanh Nghiệp (32 ký tự) - GỬI RAW BYTES - VD: CTY A
+// - Send(Char n=32 đến n=61): Địa chỉ (30 ký tự) - GỬI RAW BYTES - VD: Số 12 Đường 3122
+// - Send(3), Send(4): Footer decimal 3, 4
+//
+// Ví dụ từ doc:
+// n=0 đến n=31 là Tên DN ko đầu; VD: CTY A
+// n=32 đến n=61 là Địa chỉ DN ko đầu; VD: Số 12 Đường 3122
+// Ví dụ: 1 2 'W' 'C' 'T' 'Y' ' ' 'A' ...(space)... 'S' 'ố' ' ' '1' '2' ' ' 'Đ' 'ư' 'ờ' 'n' 'g' ' ' '3' '1' '2' '2' 3 4
+// Tổng: 67 bytes
 inline void sendSetupPrinterCommandTenDonVi(String tendonvi, String address) {
-  // Gửi lệnh SET thời gian
+  // Validate input
+  if (!tendonvi || tendonvi.length() == 0) {
+    Serial.println("ERROR: sendSetupPrinterCommandTenDonVi - tendonvi is empty");
+    return;
+  }
+  if (!address || address.length() == 0) {
+    Serial.println("ERROR: sendSetupPrinterCommandTenDonVi - address is empty");
+    return;
+  }
+  
+  // Build command buffer: Total 67 bytes
   uint8_t buffer[67];
-  buffer[0] = 1;
-  buffer[1] = 2;
-  buffer[2] = 'W'; // Write
+  buffer[0] = 1;        // Send(1) - DECIMAL 1
+  buffer[1] = 2;        // Send(2) - DECIMAL 2
+  buffer[2] = 'W';      // Send('W') - ASCII 'W' (87 decimal)
 
-  // Copy tendonvi string characters (up to 32 bytes) to buffer positions 3-34
+  // Send(Char n=0) to Send(Char n=31) - Tên Doanh Nghiệp RAW BYTES (32 ký tự)
   for (int i = 0; i < 32; i++) {
     if (i < tendonvi.length()) {
-      buffer[i + 3] = tendonvi.charAt(i);
+      buffer[i + 3] = (uint8_t)tendonvi.charAt(i); // Raw byte
     } else {
-      buffer[i + 3] = ' '; // Pad with space if string is shorter
+      buffer[i + 3] = ' '; // Pad with space (ASCII 32)
     }
   }
-  // Copy address string characters (up to 30 bytes) to buffer positions 35-64
+  
+  // Send(Char n=32) to Send(Char n=61) - Địa chỉ RAW BYTES (30 ký tự)
+  // Buffer position: 35 to 64 (32 chars TenDN + 3 header = start at 35)
   for (int i = 0; i < 30; i++) {
     if (i < address.length()) {
-      buffer[i + 35] = address.charAt(i);
+      buffer[i + 35] = (uint8_t)address.charAt(i); // Raw byte
     } else {
-      buffer[i + 35] = ' '; // Pad with space if string is shorter
+      buffer[i + 35] = ' '; // Pad with space (ASCII 32)
     }
   }
-  buffer[65] = 3;
-  buffer[66] = 4;
+  
+  buffer[65] = 3;       // Send(3) - DECIMAL 3
+  buffer[66] = 4;       // Send(4) - DECIMAL 4
+  
+  // Debug log with DECIMAL format
+  Serial.printf("[TTL] Set Tên DN: %s\n", tendonvi.c_str());
+  Serial.printf("[TTL] Set Địa chỉ: %s\n", address.c_str());
+  Serial.print("[TTL] Command (DECIMAL first 10): ");
+  for (int i = 0; i < 10; i++) {
+    // print char ra
+    Serial.printf("%c ", buffer[i]);
+  }
+  Serial.println("...");
+  
+  // Send command
   Serial2.write(buffer, sizeof(buffer));
   Serial2.flush();
+  
+  Serial.println("[TTL] Command sent");
 }
 
-// set mst to printer
+// ============================================================================
+// SETUP PRINTER - ĐẶT MÃ SỐ THUẾ (MST)
+// ============================================================================
+// Protocol: Đặt MST cho máy in
+// Format: Send(1) + Send(2) + Send('#') + Send(Char n=0-17) + Send(3) + Send(4)
+// - Send(1), Send(2): Header decimal 1, 2
+// - Send('#'): Command ASCII '#' (35 decimal)
+// - Send(Char n=0 đến n=17): Mã số thuế (18 ký tự) - GỬI RAW BYTES
+// - Send(3), Send(4): Footer decimal 3, 4
+// 
+// Ví dụ từ doc (MST = 0123456789):
+// n=0 đến n=17 là : MST = 0123456789
+// Ví dụ: 1 2 '#' '0' '1' '2' '3' '4' '5' '6' '7' '8' '9' ' ' ' ' ' ' ' ' ' ' ' ' 3 4
+// Tổng: 23 bytes
 inline void sendSetupPrinterCommandMst(String mst) {
-  // Gửi lệnh SET thời gian
+  // Validate input
+  if (!mst || mst.length() == 0) {
+    Serial.println("ERROR: sendSetupPrinterCommandMst - mst is empty");
+    return;
+  }
+  
+  // Build command buffer: Total 23 bytes
   uint8_t buffer[23];
-  buffer[0] = 1;
-  buffer[1] = 2;
-  buffer[2] = '#'; // Write
-  // Copy mst string characters (up to 18 bytes) to buffer positions 3-20
+  buffer[0] = 1;        // Send(1) - DECIMAL 1
+  buffer[1] = 2;        // Send(2) - DECIMAL 2
+  buffer[2] = '#';      // Send('#') - ASCII '#' (35 decimal)
+  
+  // Send(Char n=0) to Send(Char n=17) - MST RAW BYTES (18 ký tự)
   for (int i = 0; i < 18; i++) {
     if (i < mst.length()) {
-      buffer[i + 3] = mst.charAt(i);
+      buffer[i + 3] = (uint8_t)mst.charAt(i); // Raw byte
     } else {
-      buffer[i + 3] = ' '; // Pad with 0 if string is shorter
+      buffer[i + 3] = ' '; // Pad with space (ASCII 32)
     }
   }
-  buffer[21] = 3;
-  buffer[22] = 4;
+  
+  buffer[21] = 3;       // Send(3) - DECIMAL 3
+  buffer[22] = 4;       // Send(4) - DECIMAL 4
+  
+  // Debug log with DECIMAL format
+  Serial.printf("[TTL] Set MST: %s\n", mst.c_str());
+  Serial.print("[TTL] Command (DECIMAL): ");
+  for (int i = 0; i < sizeof(buffer); i++) {
+    Serial.printf("%d ", buffer[i]);
+  }
+  Serial.println();
+  
+  // Send command
   Serial2.write(buffer, sizeof(buffer));
   Serial2.flush();
+  
+  Serial.println("[TTL] Command sent");
 }
 
 
