@@ -125,6 +125,7 @@ struct PumpLog {
   uint16_t send3;        // Byte 29
   uint8_t checksum;      // Byte 30
   uint8_t send4;         // Byte 31
+  uint16_t cycleSave;    // Byte 32 so làn lap lai qua 2046
   uint8_t mqttSent;      // 0 = failed/pending, 1 = success
   time_t mqttSentTime;   // Timestamp of MQTT send attempt (from Google NTP)
 };

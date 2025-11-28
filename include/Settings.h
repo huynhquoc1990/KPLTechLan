@@ -7,12 +7,12 @@
 #include "Credentials.h"
 // Thông số của RS485
 #define RX_PIN              35//16-ASR // 35 34  13./ bo ISOlated màu đen: 17 / bo KC868: 13
-#define TX_PIN              32 //17-ASR //32 13   5. / bo ISOlated màu đen: 16 / bo KC868: 5
+#define TX_PIN             32 //17-ASR //32 13   5. / bo ISOlated màu đen: 16 / bo KC868: 5
 #define ITEM_SIZE_RS485     125
 #define RS485BaudRate       9600
 #define WIFI_TIMEOUT_MS     20000
 #define OUT1                15    // 15 bo A2
-#define OUT2                18     // 2  bo A2   , 18 Còi của bo ASR
+#define OUT2                2     // 2  bo A2   , 18 Còi của bo ASR
 // #define INPUT1              36
 #define RESET_CONFIG_PIN    0     // GPIO0 - nút BOOT trên ESP32, có thể thay đổi      
 #define FLASH_DATA_FILE "/log.bin" // File lưu dữ liệu log

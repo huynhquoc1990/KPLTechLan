@@ -929,24 +929,6 @@ void wifiTask(void *parameter)
     esp_task_wdt_reset();
     if (WiFi.status() != WL_CONNECTED)
     {
-      // Check if router is available before attempting connection
-      // This prevents connection attempts when router is still booting
-      Serial.println("[WiFi] Checking if router is available...");
-      bool routerAvailable = wifiManager->isRouterAvailable();
-
-      if (!routerAvailable)
-      {
-        Serial.println("[WiFi] Router not detected. Waiting before retry...");
-        // Router not available - wait and retry scan
-        // Don't turn WiFi completely off, just wait and scan again
-        for (int i = 0; i < 5; i++)
-        { // Wait 5 seconds
-          esp_task_wdt_reset();
-          vTaskDelay(pdMS_TO_TICKS(1000));
-        }
-        continue; // Retry router check
-      }
-
       Serial.println("[WiFi] Router detected. Attempting to connect...");
       static uint32_t cooldownSeconds = 10; // exponential backoff, capped
       static uint32_t failedAttempts = 0;
@@ -1771,13 +1753,21 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       Serial.printf("  TenChiNhanh: %s\n", tenChiNhanh.c_str());
       Serial.printf("  Addr: %s\n", addr.c_str());
       sendSetupPrinterCommandTenDonVi(tenChiNhanh, addr);
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(300));
+      sendSetupPrinterCommandTenDonVi(tenChiNhanh, addr);
+      vTaskDelay(pdMS_TO_TICKS(300));
+      sendSetupPrinterCommandTenDonVi(tenChiNhanh, addr);
+      vTaskDelay(pdMS_TO_TICKS(300));
       
       //set mst to printer
       Serial.println("Setting up mst to printer...");
       Serial.printf("  Mst: %s\n", mst.c_str());
       sendSetupPrinterCommandMst(mst);
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(300));
+      sendSetupPrinterCommandMst(mst);
+      vTaskDelay(pdMS_TO_TICKS(300));
+      sendSetupPrinterCommandMst(mst);
+      vTaskDelay(pdMS_TO_TICKS(300));
 
       // Check if ThongTinVoi exists and is an array before processing
       if (doc.containsKey("ThongTinVoi") && doc["ThongTinVoi"].is<JsonArray>()) {
@@ -1815,8 +1805,11 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
           Serial.printf("Setting up nhien lieu to printer: %s, %d\n", tenNhienLieu, soVoi);
           // set nhien lieu to printer
           sendSetupPrinterCommandNhienLieu(tenNhienLieu, soVoi);
-          vTaskDelay(pdMS_TO_TICKS(1000));
-          // sendSetupPrinterCommandNhienLieu(tenNhienLieu, soVoi);
+          vTaskDelay(pdMS_TO_TICKS(300)); 
+          sendSetupPrinterCommandNhienLieu(tenNhienLieu, soVoi);
+          vTaskDelay(pdMS_TO_TICKS(300));
+          sendSetupPrinterCommandNhienLieu(tenNhienLieu, soVoi);
+          vTaskDelay(pdMS_TO_TICKS(300));  
           // vTaskDelay(pdMS_TO_TICKS(1000));
         }
       } else {
@@ -2706,6 +2699,7 @@ void sendMQTTData(const PumpLog &log)
   }
   else if (updatedLog.viTriLogData >= 1 && updatedLog.viTriLogData <= MAX_LOGS)
   {
+    
     if (xQueueSend(saveLogQueue, &updatedLog, pdMS_TO_TICKS(100)) == pdTRUE)
     {
       Serial.printf("💾 Log %d saved to saveLogQueue\n", updatedLog.viTriLogData);

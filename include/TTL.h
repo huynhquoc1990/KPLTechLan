@@ -44,6 +44,7 @@ inline void sendSetupPrinterCommandNhienLieu(String nhienlieu, uint8_t address) 
   } else {
     buffer[3] = 'A';            // 'A' (ASCII 65) for vòi 10
   }
+  // buffer[3] = '5';            // 'A' (ASCII 65) for vòi 10
   
   // Send(Char n=0) to Send(Char n=16) - Tên nhiên liệu RAW BYTES (17 ký tự)
   // Gửi trực tiếp bytes của string, không convert
@@ -62,11 +63,11 @@ inline void sendSetupPrinterCommandNhienLieu(String nhienlieu, uint8_t address) 
   Serial.printf("[TTL] Set Nhiên Liệu - Vòi %d: %s\n", address, nhienlieu.c_str());
   Serial.print("[TTL] Command (DECIMAL): ");
   for (int i = 0; i < sizeof(buffer); i++) {
-    Serial.printf("%c ", buffer[i]);
+    Serial.printf("%c", buffer[i]);
   }
   Serial.println();
   
-  // Send command
+  // Send command byte-by-byte to ensure stability
   Serial2.write(buffer, sizeof(buffer));
   Serial2.flush();
   
@@ -109,7 +110,7 @@ inline void sendSetupPrinterCommandTenDonVi(String tendonvi, String address) {
   // Send(Char n=0) to Send(Char n=31) - Tên Doanh Nghiệp RAW BYTES (32 ký tự)
   for (int i = 0; i < 32; i++) {
     if (i < tendonvi.length()) {
-      buffer[i + 3] = (uint8_t)tendonvi.charAt(i); // Raw byte
+      buffer[i + 3] = (char)tendonvi.charAt(i); // Raw byte
     } else {
       buffer[i + 3] = ' '; // Pad with space (ASCII 32)
     }
@@ -119,7 +120,7 @@ inline void sendSetupPrinterCommandTenDonVi(String tendonvi, String address) {
   // Buffer position: 35 to 64 (32 chars TenDN + 3 header = start at 35)
   for (int i = 0; i < 30; i++) {
     if (i < address.length()) {
-      buffer[i + 35] = (uint8_t)address.charAt(i); // Raw byte
+      buffer[i + 35] = (char)address.charAt(i); // Raw byte
     } else {
       buffer[i + 35] = ' '; // Pad with space (ASCII 32)
     }
@@ -129,16 +130,14 @@ inline void sendSetupPrinterCommandTenDonVi(String tendonvi, String address) {
   buffer[66] = 4;       // Send(4) - DECIMAL 4
   
   // Debug log with DECIMAL format
-  Serial.printf("[TTL] Set Tên DN: %s\n", tendonvi.c_str());
-  Serial.printf("[TTL] Set Địa chỉ: %s\n", address.c_str());
-  Serial.print("[TTL] Command (DECIMAL first 10): ");
-  for (int i = 0; i < 10; i++) {
+  Serial.print("[TTL] Command (String): ");
+  for (int i = 0; i < sizeof(buffer); i++) {
     // print char ra
-    Serial.printf("%c ", buffer[i]);
+    Serial.printf("%c", buffer[i]);
   }
   Serial.println("...");
   
-  // Send command
+  // Send command byte-by-byte to ensure stability
   Serial2.write(buffer, sizeof(buffer));
   Serial2.flush();
   
@@ -175,7 +174,7 @@ inline void sendSetupPrinterCommandMst(String mst) {
   // Send(Char n=0) to Send(Char n=17) - MST RAW BYTES (18 ký tự)
   for (int i = 0; i < 18; i++) {
     if (i < mst.length()) {
-      buffer[i + 3] = (uint8_t)mst.charAt(i); // Raw byte
+      buffer[i + 3] = (char)mst.charAt(i); // Raw byte
     } else {
       buffer[i + 3] = ' '; // Pad with space (ASCII 32)
     }
@@ -186,13 +185,13 @@ inline void sendSetupPrinterCommandMst(String mst) {
   
   // Debug log with DECIMAL format
   Serial.printf("[TTL] Set MST: %s\n", mst.c_str());
-  Serial.print("[TTL] Command (DECIMAL): ");
+  Serial.print("[TTL] Command (char): ");
   for (int i = 0; i < sizeof(buffer); i++) {
-    Serial.printf("%d ", buffer[i]);
+    Serial.printf("%c", buffer[i]);
   }
   Serial.println();
   
-  // Send command
+  // Send command byte-by-byte to ensure stability
   Serial2.write(buffer, sizeof(buffer));
   Serial2.flush();
   
