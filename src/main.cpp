@@ -316,27 +316,6 @@ void readMacEsp()
           (uint8_t)(chipid >> 16), (uint8_t)(chipid >> 8), (uint8_t)chipid);
   Serial.println("Mac: " + String(macStr));
 
-  // SECURITY: Validate MAC with server
-  // if (!validateMacWithServer(macStr))
-  // {
-  //   Serial.println("❌ DEVICE NOT AUTHORIZED!");
-  //   Serial.println("MAC address not found in authorized devices list.");
-  //   Serial.println("Contact KPL Tech support: 0xxx-xxx-xxx");
-
-  //   // Brick device - infinite loop
-  //   while (true)
-  //   {
-  //     digitalWrite(OUT1, HIGH);
-  //     digitalWrite(OUT2, HIGH);
-  //     delay(500);
-  //     digitalWrite(OUT1, LOW);
-  //     digitalWrite(OUT2, LOW);
-  //     delay(500);
-  //     Serial.println("UNAUTHORIZED DEVICE - Contact support");
-  //     delay(30000); // Print every 30 seconds
-  //   }
-  // }
-
   Serial.println("✓ Device authorized by server");
 
   // call api để check mac có trong hệ thống hay không, sử dụng Phương thức Poss
@@ -511,6 +490,7 @@ void systemInit()
   sendStartupCommand();
 
   Serial.printf("System initialized - Current ID: %u\n", currentId);
+
 }
 
 // ============================================================================
@@ -627,12 +607,12 @@ void systemCheck()
     }
 
     // Check task states
-    if (rs485TaskHandle && eTaskGetState(rs485TaskHandle) == eDeleted)
-    {
-      Serial.println("WARNING: RS485 task deleted, restarting...");
-      setSystemStatus("WARNING", "RS485 task deleted and restarted");
-      xTaskCreatePinnedToCore(rs485Task, "RS485", 8192, NULL, 3, &rs485TaskHandle, 0);
-    }
+    // if (rs485TaskHandle && eTaskGetState(rs485TaskHandle) == eDeleted)
+    // {
+    //   Serial.println("WARNING: RS485 task deleted, restarting...");
+    //   setSystemStatus("WARNING", "RS485 task deleted and restarted");
+    //   xTaskCreatePinnedToCore(rs485Task, "RS485", 8192, NULL, 3, &rs485TaskHandle, 0);
+    // }
   }
 }
 
@@ -891,10 +871,10 @@ void wifiTask(void *parameter)
     Serial.println("No valid WiFi config found. Entering AP configuration mode.");
 
     // Tạm dừng các task khác để ưu tiên
-    if (rs485TaskHandle != NULL)
-      vTaskSuspend(rs485TaskHandle);
-    if (mqttTaskHandle != NULL)
-      vTaskSuspend(mqttTaskHandle);
+    // if (rs485TaskHandle != NULL)
+    //   vTaskSuspend(rs485TaskHandle);
+    // if (mqttTaskHandle != NULL)
+    //   vTaskSuspend(mqttTaskHandle);
 
     // Bật chế độ AP, quét Wi-Fi một lần và khởi động web server
     wifiManager->startConfigurationPortal();
@@ -1364,7 +1344,6 @@ void rs485Task(void *parameter)
       {
         checkLogSend = 0; // dùng để kiểm tra có phát sinh giao dịch ko, nếu có reset biến này.
         sendLogRequest(static_cast<uint32_t>(dataLog.Logid));
-
         // Đọc giá trị được lưu trong Flash và gửi lên MQTT
         // readLogFromFlash(static_cast<uint32_t>(dataLog.Logid));
       }
