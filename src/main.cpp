@@ -172,6 +172,7 @@ void sendPriceChangeCommand(const PriceChangeRequest &request);
 void printPartitionInfo();                          // CRITICAL: Added forward declaration
 bool validateMacWithServer(const char *macAddress); // SECURITY: MAC validation
 void saveLogTask(void *parameter);
+void saveLogNotConnectMqtt(const PumpLog &log); // save log to flash if not connected to MQTT
 void processLogBatch(int batchSize);
 void saveLogToFlash(const PumpLog &log);
 void savePriceChangeWithRetry(uint8_t deviceId, const char *idDevice, float unitPrice, const char *idChiNhanh, NozzlePrices &prices, SemaphoreHandle_t flashMutex);
@@ -873,8 +874,8 @@ void wifiTask(void *parameter)
     // Tạm dừng các task khác để ưu tiên
     // if (rs485TaskHandle != NULL)
     //   vTaskSuspend(rs485TaskHandle);
-    // if (mqttTaskHandle != NULL)
-    //   vTaskSuspend(mqttTaskHandle);
+    if (mqttTaskHandle != NULL)
+      vTaskSuspend(mqttTaskHandle);
 
     // Bật chế độ AP, quét Wi-Fi một lần và khởi động web server
     wifiManager->startConfigurationPortal();
@@ -1078,6 +1079,16 @@ void mqttTask(void *parameter)
     }
     else
     {
+      // check nums of queue mqttQueue, if > 0, save to flash
+      if (uxQueueMessagesWaiting(mqttQueue) > 0)
+      {
+        PumpLog log;
+        if (xQueueReceive(mqttQueue, &log, pdMS_TO_TICKS(10)) == pdTRUE)
+        {
+          Serial.printf("Saving log %d not connected to MQTT\n", log.viTriLogData);
+          saveLogNotConnectMqtt(log);
+        }
+      }
       // WiFi disconnected - unsubscribe and disconnect MQTT
       if (mqttClient.connected() && mqttSubscribed)
       {
@@ -1343,9 +1354,9 @@ void rs485Task(void *parameter)
       if (xQueueReceive(logIdLossQueue, &dataLog, 0) == pdTRUE)
       {
         checkLogSend = 0; // dùng để kiểm tra có phát sinh giao dịch ko, nếu có reset biến này.
-        sendLogRequest(static_cast<uint32_t>(dataLog.Logid));
+        // sendLogRequest(static_cast<uint32_t>(dataLog.Logid));
         // Đọc giá trị được lưu trong Flash và gửi lên MQTT
-        // readLogFromFlash(static_cast<uint32_t>(dataLog.Logid));
+        readLogFromFlash(static_cast<uint32_t>(dataLog.Logid));
       }
     }
 
@@ -2622,8 +2633,39 @@ void publishPriceChangeSuccess(uint8_t deviceId, const char *idDevice, float uni
   }
 }
 
-void sendMQTTData(const PumpLog &log)
-{
+
+void saveLogNotConnectMqtt(const PumpLog &log){
+  // Prepare updated log with MQTT status
+  PumpLog updatedLog = log;
+  updatedLog.mqttSentTime = time(NULL); // Timestamp from Google NTP (success or failure)
+  updatedLog.mqttSent = 0; // Failed
+  // Save to Flash at position viTriLogData (1-5000)
+  // Skip if old partition detected (to prevent crashes)
+  if (!g_flashSaveEnabled)
+  {
+    Serial.printf("⚠️ Flash save SKIPPED for Log %d (old partition detected)\n", updatedLog.viTriLogData);
+  }
+  else if (updatedLog.viTriLogData >= 1 && updatedLog.viTriLogData <= MAX_LOGS)
+  {
+    
+    if (xQueueSend(saveLogQueue, &updatedLog, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+      Serial.printf("💾 Log %d saved to saveLogQueue not connected to MQTT\n", updatedLog.viTriLogData);
+    }
+    else
+    {
+      Serial.printf("⚠️ Failed to save Log %d to saveLogQueue\n", updatedLog.viTriLogData);
+    }
+  }
+  else
+  {
+    Serial.printf("ERROR: Invalid viTriLogData=%d\n", updatedLog.viTriLogData);
+  }
+
+}
+
+
+void sendMQTTData(const PumpLog &log){
   String jsonData = convertPumpLogToJson(log);
 
   int retryCount = 0;
